@@ -13,8 +13,8 @@ sys.path.insert(0, '.')
 
 import pandas as pd
 from genome.schema import (
-    CandidateGenome, ConfirmationIndicator, DcaGenome, GridMethod,
-    LineageMetadata, TpExitMethod, TpGenome,
+    AllocationMethod, CandidateGenome, ComboMethod, ConfirmationIndicator,
+    DcaGenome, GridMethod, LineageMetadata, TpExitMethod, TpGenome, TriggerMode,
 )
 from evolution.config import EvolutionConfig
 from evolution.harness import EvolutionHarness
@@ -37,11 +37,11 @@ def make_seeded_candidate(rng, genome_id, generation_index, gid,
     dca = DcaGenome(
         grid_method=GridMethod.FIXED_PCT,
         grid_params={"pct": grid_pct, "max_layers": max_layers, "tp_pct": tp_pct},
-        allocation_method='equal',
+        allocation_method=AllocationMethod.EQUAL,
         allocation_params={},
-        combo_method='weighted_average',
+        combo_method=ComboMethod.WEIGHTED_AVERAGE,
         combo_params={},
-        trigger_mode='price_only',
+        trigger_mode=TriggerMode.PRICE_ONLY,
         confirmation_indicators=indicators,
         indicator_params=ind_params,
         max_dca_layers=max_layers,
@@ -153,23 +153,22 @@ def main():
     print(f"[seeded_ga] Seeded population built: {len(seeded_pop)} candidates")
 
     config = EvolutionConfig(
-        n_candidates=args.candidates,
+        candidates_per_gen=args.candidates,
         elite_count=args.elite_count,
         max_generations=args.max_generations,
         wall_time_seconds=args.wall_time_seconds,
-        stagnation_limit=5,
-        all_rejected_limit=3,
-        n_workers=8,
+        stagnation_generations=5,
+        all_rejected_generations=3,
+        parallel_workers=8,
         output_dir=args.output_dir,
-        experiment_slug="seeded_v1",
+        experiment_id="seeded_v1",
     )
 
     harness = EvolutionHarness(
         config=config,
         df=df,
-        experiment_id="seeded_v1",
-        rng=rng,
         seeded_population=seeded_pop,
+        rng=rng,
     )
 
     t0 = time.time()
@@ -179,12 +178,11 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"SEEDED GA COMPLETE")
     print(f"{'=' * 60}")
-    print(f"  Status:           {result.status}")
+    print(f"  Status:           {result.termination_reason}")
     print(f"  Generations:      {result.generations_completed} / {config.max_generations}")
     print(f"  Total candidates: {result.total_candidates_evaluated}")
     print(f"  Best fitness:     {result.best_fitness_ever:.6f}")
-    print(f"  Best genome:      {result.best_genome_id}")
-    print(f"  Deploy passing:   {result.n_deployment_passing}")
+    print(f"  Best genome:      {result.best_genome_id_ever}")
     print(f"  Runtime:          {elapsed:.1f}s")
     print(f"  Output dir:       {config.output_dir}")
 
