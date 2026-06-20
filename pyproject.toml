@@ -7,7 +7,7 @@ addopts = "-ra --strict-markers --tb=short"
 markers = [
     "stage1: Stage 1 foundation tests (config + ID + metadata)",
     "stage2: Stage 2 data pipeline tests",
-    "stage3: Stage 3 DCA skeleton tests",
+    "stage3: Stage 3 DCA engine tests",
     "stage4: Stage 4 genome schema tests",
     "stage5: Stage 5 reward engine tests",
     "stage15: Stage 15 reporting tests",
@@ -36,3 +36,5 @@ ignore = [
 "genome/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
 "reward/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
 "reports/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
+"dca_engine/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
+"data/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
