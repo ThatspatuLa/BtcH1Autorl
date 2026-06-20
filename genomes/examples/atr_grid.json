@@ -1,0 +1,37 @@
+{
+  "_description": "ATR-based grid (volatility-aware spacing). ATR×2 multiplier between layers. TP via trailing stop after +1.5%. Higher max layers for trending markets.",
+  "genome_id": "22222222-2222-4222-8222-222222222222",
+  "dca_genome": {
+    "grid_method": "atr",
+    "grid_params": {"atr_period": 14, "atr_multiplier": 2.0, "max_layers": 8},
+    "allocation_method": "linear_increasing",
+    "allocation_params": {"base_notional": 80.0, "step_pct": 0.30, "allocation_cap_pct": 0.15},
+    "combo_method": "weighted_average",
+    "combo_params": {"atr_weight": 0.7, "fixed_weight": 0.3},
+    "trigger_mode": "price_with_confirmation",
+    "confirmation_indicators": ["volatility_high", "rsi_below"],
+    "max_dca_layers": 8
+  },
+  "tp_genome": {
+    "exit_method": "trailing",
+    "exit_params": {"activation_pct": 1.5, "trail_pct": 0.8},
+    "sub_exits": []
+  },
+  "safety_genome": {
+    "max_dca_layers": 8,
+    "overlap_allowed": true,
+    "min_break_even_for_overlap_pct": 1.0,
+    "require_buffer_pct": 0.25
+  },
+  "settings_overrides": {
+    "leverage": 3.0
+  },
+  "lineage": {
+    "parent_a_id": null,
+    "parent_b_id": null,
+    "generation_index": 0,
+    "mutation_seed": null,
+    "mutation_ops": [],
+    "created_at": null
+  }
+}

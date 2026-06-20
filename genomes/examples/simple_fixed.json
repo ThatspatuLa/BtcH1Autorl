@@ -1,0 +1,35 @@
+{
+  "_description": "Simple example: fixed 1.5% grid, equal allocation, fixed +2% TP. Conservative baseline.",
+  "genome_id": "11111111-1111-4111-8111-111111111111",
+  "dca_genome": {
+    "grid_method": "fixed_pct",
+    "grid_params": {"grid_pct": 1.5, "max_layers": 5},
+    "allocation_method": "equal",
+    "allocation_params": {"base_notional": 100.0, "allocation_cap_pct": 0.10},
+    "combo_method": "weighted_average",
+    "combo_params": {},
+    "trigger_mode": "price_only",
+    "confirmation_indicators": [],
+    "max_dca_layers": 5
+  },
+  "tp_genome": {
+    "exit_method": "fixed",
+    "exit_params": {"tp_pct": 2.0},
+    "sub_exits": []
+  },
+  "safety_genome": {
+    "max_dca_layers": 5,
+    "overlap_allowed": false,
+    "min_break_even_for_overlap_pct": 0.0,
+    "require_buffer_pct": 0.20
+  },
+  "settings_overrides": {},
+  "lineage": {
+    "parent_a_id": null,
+    "parent_b_id": null,
+    "generation_index": 0,
+    "mutation_seed": null,
+    "mutation_ops": [],
+    "created_at": null
+  }
+}

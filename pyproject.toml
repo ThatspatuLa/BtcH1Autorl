@@ -10,6 +10,7 @@ markers = [
     "stage3: Stage 3 DCA skeleton tests",
     "stage4: Stage 4 genome schema tests",
     "stage5: Stage 5 reward engine tests",
+    "stage15: Stage 15 reporting tests",
     "integration: cross-stage integration tests",
 ]
 
@@ -30,4 +31,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["B", "N"]
+"tests/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
+"configs/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
+"genome/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
+"reward/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
+"reports/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]

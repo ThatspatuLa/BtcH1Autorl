@@ -1,0 +1,41 @@
+{
+  "_description": "Z-score grid (mean-reversion). TP partial ladder with break-even recovery.",
+  "genome_id": "44444444-4444-4444-8444-444444444444",
+  "dca_genome": {
+    "grid_method": "z_score",
+    "grid_params": {"z_threshold": -1.5, "lookback": 100, "max_layers": 7},
+    "allocation_method": "controlled_exp",
+    "allocation_params": {"base_notional": 70.0, "exp_factor": 1.3, "allocation_cap_pct": 0.18},
+    "combo_method": "weighted_average",
+    "combo_params": {},
+    "trigger_mode": "price_only",
+    "confirmation_indicators": [],
+    "max_dca_layers": 7
+  },
+  "tp_genome": {
+    "exit_method": "partial_ladder",
+    "exit_params": {"levels": [[0.3, 0.5], [0.8, 0.3], [1.2, 0.2]]},
+    "sub_exits": [
+      {
+        "exit_method": "break_even",
+        "exit_params": {"recovery_pct": 0.0, "min_age_candles": 4},
+        "sub_exits": []
+      }
+    ]
+  },
+  "safety_genome": {
+    "max_dca_layers": 7,
+    "overlap_allowed": false,
+    "min_break_even_for_overlap_pct": 0.0,
+    "require_buffer_pct": 0.20
+  },
+  "settings_overrides": {},
+  "lineage": {
+    "parent_a_id": null,
+    "parent_b_id": null,
+    "generation_index": 0,
+    "mutation_seed": null,
+    "mutation_ops": [],
+    "created_at": null
+  }
+}

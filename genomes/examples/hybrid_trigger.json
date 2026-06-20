@@ -1,0 +1,41 @@
+{
+  "_description": "Drawdown-from-high grid with price + RSI confirmation. TP is partial ladder: 30% at +50%, 30% at +100%, trail remaining 40%.",
+  "genome_id": "33333333-3333-4333-8333-333333333333",
+  "dca_genome": {
+    "grid_method": "drawdown_from_high",
+    "grid_params": {"dd_pct": 2.5, "max_layers": 6},
+    "allocation_method": "drawdown_adjusted",
+    "allocation_params": {"base_notional": 90.0, "dd_amplifier": 1.5, "allocation_cap_pct": 0.12},
+    "combo_method": "conditional_switch",
+    "combo_params": {"high_vol_threshold": 0.02, "low_vol_threshold": 0.005},
+    "trigger_mode": "price_with_confirmation",
+    "confirmation_indicators": ["rsi_below", "ma_above"],
+    "max_dca_layers": 6
+  },
+  "tp_genome": {
+    "exit_method": "partial_ladder",
+    "exit_params": {"levels": [[0.5, 0.3], [1.0, 0.3], [1.5, 0.4]]},
+    "sub_exits": [
+      {
+        "exit_method": "trailing",
+        "exit_params": {"activation_pct": 1.5, "trail_pct": 0.5},
+        "sub_exits": []
+      }
+    ]
+  },
+  "safety_genome": {
+    "max_dca_layers": 6,
+    "overlap_allowed": false,
+    "min_break_even_for_overlap_pct": 0.0,
+    "require_buffer_pct": 0.30
+  },
+  "settings_overrides": {},
+  "lineage": {
+    "parent_a_id": null,
+    "parent_b_id": null,
+    "generation_index": 0,
+    "mutation_seed": null,
+    "mutation_ops": [],
+    "created_at": null
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "_description": "RSI oversold grid (counter-trend DCA). Trailing TP with +25% activation threshold.",
+  "genome_id": "55555555-5555-4555-8555-555555555555",
+  "dca_genome": {
+    "grid_method": "rsi_oversold",
+    "grid_params": {"rsi_period": 14, "rsi_threshold": 30, "max_layers": 6},
+    "allocation_method": "volatility_adjusted",
+    "allocation_params": {"base_notional": 100.0, "vol_inverse_factor": 0.8, "allocation_cap_pct": 0.12},
+    "combo_method": "weighted_average",
+    "combo_params": {},
+    "trigger_mode": "price_with_confirmation",
+    "confirmation_indicators": ["rsi_below"],
+    "max_dca_layers": 6
+  },
+  "tp_genome": {
+    "exit_method": "trailing",
+    "exit_params": {"activation_pct": 2.5, "trail_pct": 1.2},
+    "sub_exits": []
+  },
+  "safety_genome": {
+    "max_dca_layers": 6,
+    "overlap_allowed": true,
+    "min_break_even_for_overlap_pct": 1.5,
+    "require_buffer_pct": 0.25
+  },
+  "settings_overrides": {},
+  "lineage": {
+    "parent_a_id": null,
+    "parent_b_id": null,
+    "generation_index": 0,
+    "mutation_seed": null,
+    "mutation_ops": [],
+    "created_at": null
+  }
+}
