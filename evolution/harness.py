@@ -64,12 +64,16 @@ class EvolutionHarness:
         config: EvolutionConfig,
         df: pd.DataFrame,
         hooks: HarnessHooks | None = None,
+        seeded_population: list[CandidateGenome] | None = None,
+        rng: random.Random | None = None,
     ):
         self.config = config
         self.df = df
         self.hooks = hooks or HarnessHooks()
         self.evaluator = CandidateEvaluator(df, experiment_slug=config.experiment_id)
         self._interrupted = False
+        self._seeded_population = seeded_population
+        self._rng = rng or random.Random()
         self._setup_signal_handler()
 
     def _setup_signal_handler(self) -> None:
@@ -106,7 +110,7 @@ class EvolutionHarness:
 
         # Resume from the next generation
         start_gen = len(history.generations)
-        rng = random.Random(self.config.base_seed + start_gen)
+        rng = self._rng if self._rng is not None else random.Random(self.config.base_seed + start_gen)
 
         # Track stagnation state across the run
         last_improvement_gen = start_gen  # any improvement since start is "now"
@@ -344,7 +348,9 @@ class EvolutionHarness:
         rng: random.Random,
         gen_idx: int,
     ) -> list[CandidateGenome]:
-        """All-random gen 0."""
+        """Gen 0: use seeded population if provided, else all-random."""
+        if self._seeded_population is not None:
+            return self._seeded_population
         return [
             random_candidate_genome(
                 rng=rng,
