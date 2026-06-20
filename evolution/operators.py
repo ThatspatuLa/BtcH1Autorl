@@ -27,11 +27,23 @@ from genome.schema import (
 # Parameter ranges (the search space)
 # ============================================================
 
-# Stage 10 only varies (grid_pct, max_layers). When Stage 10 graduates to
-# real DCA grid methods, this expands to include the Stage 8 grid params.
+# Stage 10 (expanded) search space.
+#
+# Why wider than v1? The first 3 runs all failed with rejection=tpm<5 —
+# meaning candidates weren't generating enough closed trades in 5 years of
+# H1 BTC data. The placeholder OrderManager only closes cycles when the
+# price moves enough to hit either grid_pct (down for layers) or tp_pct
+# (up for close). Tight ranges miss most market action.
+#
+# New ranges:
+# - grid_pct: 0.003..0.08  (was 0.005..0.05)  — wider range, captures both
+#   "buy the dip" and "deep dip" strategies
+# - max_layers: 2..12      (was 2..8)        — more depth for martingale
+# - tp_pct: 0.005..0.05    (was locked 0.02) — GA can pair TP with grid
 DCA_PARAM_RANGES: dict[str, tuple[float, float]] = {
-    "grid_pct": (0.005, 0.05),       # 0.5% to 5% between layers
-    "max_layers": (2, 8),             # 2 to 8 DCA layers per cycle
+    "grid_pct": (0.003, 0.08),
+    "max_layers": (2, 12),
+    "tp_pct": (0.005, 0.05),
 }
 
 # Allocation params (not used in Stage 9 baseline but kept for future Stage 10+)
@@ -63,20 +75,25 @@ def random_dca_genome(
     rng: random.Random | None = None,
     genome_id: str | None = None,
     generation_index: int = 0,
+    tp_pct: float | None = None,
 ) -> DcaGenome:
     """Generate a random DcaGenome within the v1 search space.
 
-    Stage 10 only varies (grid_pct, max_layers). grid_method is hardcoded
-    to fixed_pct because Stage 3 OrderManager only supports that. When
-    Stage 10 wires Stage 8 grid spacing properly, this will expand.
+    The genome carries (grid_pct, max_layers, tp_pct) in grid_params under
+    the keys "pct", "max_layers", "tp_pct". When Stage 10 wires the full
+    Stage 8 grid spacing, this is replaced with proper grid_method params.
+
+    tp_pct default: random within DCA_PARAM_RANGES["tp_pct"] if not given.
     """
     rng = rng or random.Random()
     grid_pct = rng.uniform(*DCA_PARAM_RANGES["grid_pct"])
     max_layers_lo, max_layers_hi = DCA_PARAM_RANGES["max_layers"]
     max_layers = rng.randint(int(max_layers_lo), int(max_layers_hi))
+    if tp_pct is None:
+        tp_pct = rng.uniform(*DCA_PARAM_RANGES["tp_pct"])
     return DcaGenome(
         grid_method=GridMethod.FIXED_PCT,
-        grid_params={"pct": grid_pct},
+        grid_params={"pct": grid_pct, "max_layers": max_layers, "tp_pct": tp_pct},
         allocation_method=AllocationMethod.EQUAL,
         allocation_params={},
         max_dca_layers=max_layers,
@@ -89,15 +106,24 @@ def random_candidate_genome(
     generation_index: int = 0,
     tp_pct: float = 0.02,
 ) -> CandidateGenome:
-    """Generate a full random CandidateGenome with fixed TP (Stage 9)."""
+    """Generate a full random CandidateGenome.
+
+    The genome carries a random tp_pct in dca_genome.grid_params["tp_pct"].
+    The tp_genome uses the same tp_pct (so the Stage 9 baseline reads it
+    correctly). When tp_pct is passed as an argument, it overrides the
+    random generation (used by resume / deterministic seeding).
+    """
     rng = rng or random.Random()
+    dca = random_dca_genome(
+        rng=rng, generation_index=generation_index, tp_pct=tp_pct,
+    )
     gid = genome_id or f"genome_G{generation_index}_{rng.randint(0, 1_000_000):06d}"
     return CandidateGenome(
         genome_id=gid,
-        dca_genome=random_dca_genome(rng=rng, generation_index=generation_index),
+        dca_genome=dca,
         tp_genome=TpGenome(
             exit_method=TpExitMethod.FIXED,
-            exit_params={"tp_pct": tp_pct},
+            exit_params={"tp_pct": dca.grid_params["tp_pct"]},
         ),
         lineage=LineageMetadata(
             parent_a_id=None,
@@ -132,7 +158,6 @@ def mutate(
     if rng.random() < mutation_rate:
         lo, hi = DCA_PARAM_RANGES["grid_pct"]
         span = hi - lo
-        # Gaussian with stddev = 20% of range — most mutations are small
         new_grid_pct = new_grid_pct + rng.gauss(0, span * 0.20)
         new_grid_pct = max(lo, min(hi, new_grid_pct))
 
@@ -140,21 +165,32 @@ def mutate(
     new_max_layers = parent_dca.max_dca_layers
     if rng.random() < mutation_rate:
         lo, hi = DCA_PARAM_RANGES["max_layers"]
-        # ±1 with 80% chance, ±2 with 20%
         delta = rng.choice([-2, -1, 1, 2]) if rng.random() < 0.20 else rng.choice([-1, 1])
         new_max_layers = max(lo, min(hi, new_max_layers + delta))
+
+    # Mutate tp_pct (newly enabled in the expanded search space)
+    new_tp_pct = float(parent_dca.grid_params.get("tp_pct", 0.02))
+    if rng.random() < mutation_rate:
+        lo, hi = DCA_PARAM_RANGES["tp_pct"]
+        span = hi - lo
+        new_tp_pct = new_tp_pct + rng.gauss(0, span * 0.20)
+        new_tp_pct = max(lo, min(hi, new_tp_pct))
 
     # Build child genome
     new_dca = DcaGenome(
         grid_method=parent_dca.grid_method,
-        grid_params={"pct": new_grid_pct},
+        grid_params={
+            "pct": new_grid_pct,
+            "max_layers": new_max_layers,
+            "tp_pct": new_tp_pct,
+        },
         allocation_method=parent_dca.allocation_method,
         allocation_params=dict(parent_dca.allocation_params),
         max_dca_layers=int(new_max_layers),
     )
     new_tp = TpGenome(
         exit_method=parent.tp_genome.exit_method,
-        exit_params=dict(parent.tp_genome.exit_params),
+        exit_params={"tp_pct": new_tp_pct},
     )
     cid = child_id or f"genome_G{parent.lineage.generation_index + 1}_{rng.randint(0, 1_000_000):06d}"
     return CandidateGenome(
@@ -186,7 +222,8 @@ def crossover(
 ) -> CandidateGenome:
     """Uniform crossover: each param has 50% chance of coming from A or B.
 
-    TP genome is inherited from parent A (Stage 10 keeps TP fixed).
+    TP genome (fixed) is inherited from parent A so the Stage 9 baseline
+    reads it correctly.
     """
     rng = rng or random.Random()
 
@@ -198,23 +235,27 @@ def crossover(
     # max_layers: pick from one parent
     new_layers = parent_a.dca_genome.max_dca_layers if rng.random() < 0.5 else parent_b.dca_genome.max_dca_layers
 
+    # tp_pct: pick from one parent
+    a_tp = float(parent_a.dca_genome.grid_params.get("tp_pct", 0.02))
+    b_tp = float(parent_b.dca_genome.grid_params.get("tp_pct", 0.02))
+    new_tp = a_tp if rng.random() < 0.5 else b_tp
+
     new_dca = DcaGenome(
-        grid_method=parent_a.dca_genome.grid_method,  # both fixed_pct in Stage 10
-        grid_params={"pct": new_pct},
+        grid_method=parent_a.dca_genome.grid_method,
+        grid_params={"pct": new_pct, "max_layers": new_layers, "tp_pct": new_tp},
         allocation_method=parent_a.dca_genome.allocation_method,
         allocation_params={},
         max_dca_layers=new_layers,
     )
-    # TP from parent A (Stage 10 keeps TP fixed)
-    new_tp = TpGenome(
+    new_tp_genome = TpGenome(
         exit_method=parent_a.tp_genome.exit_method,
-        exit_params=dict(parent_a.tp_genome.exit_params),
+        exit_params={"tp_pct": new_tp},
     )
     cid = child_id or f"genome_G{max(parent_a.lineage.generation_index, parent_b.lineage.generation_index) + 1}_{rng.randint(0, 1_000_000):06d}"
     return CandidateGenome(
         genome_id=cid,
         dca_genome=new_dca,
-        tp_genome=new_tp,
+        tp_genome=new_tp_genome,
         lineage=LineageMetadata(
             parent_a_id=parent_a.genome_id,
             parent_b_id=parent_b.genome_id,

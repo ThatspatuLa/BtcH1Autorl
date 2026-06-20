@@ -141,6 +141,70 @@ def test_random_candidate_genome_ids_unique():
 
 
 # ============================================================
+# Test: operators — expanded search space (Stage 10 v2)
+# ============================================================
+
+def test_random_dca_genome_search_space_includes_tp_pct():
+    """The expanded search space: grid_pct, max_layers, AND tp_pct."""
+    rng = random.Random(42)
+    samples = [random_dca_genome(rng=rng, generation_index=0) for _ in range(50)]
+    pcts = [s.grid_params["pct"] for s in samples]
+    layers = [s.max_dca_layers for s in samples]
+    tps = [s.grid_params["tp_pct"] for s in samples]
+    # grid_pct range: 0.003..0.08
+    assert all(0.003 <= p <= 0.08 for p in pcts)
+    assert max(pcts) - min(pcts) > 0.04  # actually varying
+    # max_layers: 2..12
+    assert all(2 <= n_layers <= 12 for n_layers in layers)
+    # tp_pct: 0.005..0.05 (new dimension)
+    assert all(0.005 <= t <= 0.05 for t in tps)
+    assert max(tps) - min(tps) > 0.02  # actually varying
+
+
+def test_random_dca_tp_synced_with_tp_genome():
+    """The tp_pct in dca_genome.grid_params must match tp_genome.exit_params."""
+    rng = random.Random(7)
+    for _ in range(20):
+        g = random_candidate_genome(rng=rng, generation_index=0)
+        assert g.dca_genome.grid_params["tp_pct"] == g.tp_genome.exit_params["tp_pct"]
+
+
+def test_crossover_keeps_tp_synced():
+    """Crossover must keep dca_genome.tp_pct == tp_genome.tp_pct."""
+    rng = random.Random(13)
+    a = random_candidate_genome(rng=rng, generation_index=0)
+    b = random_candidate_genome(rng=rng, generation_index=1)
+    for _ in range(20):
+        child = crossover(a, b, rng=rng)
+        assert child.dca_genome.grid_params["tp_pct"] == child.tp_genome.exit_params["tp_pct"]
+
+
+def test_mutate_can_change_tp_pct():
+    """With the expanded search space, mutate SHOULD sometimes change tp_pct."""
+    rng = random.Random(99)
+    parent = random_candidate_genome(rng=rng, generation_index=0)
+    parent_tp = parent.dca_genome.grid_params["tp_pct"]
+    changed = 0
+    for _ in range(50):
+        child = mutate(parent, rng=rng, mutation_rate=1.0)
+        if abs(child.dca_genome.grid_params["tp_pct"] - parent_tp) > 1e-9:
+            changed += 1
+    # At high mutation_rate (1.0) we expect most to change
+    assert changed > 25, f"Expected >25 changes in 50 mutations, got {changed}"
+
+
+def test_extract_dca_params_returns_three_values():
+    """extract_dca_params_from_genome now returns grid_pct, max_layers, tp_pct."""
+    from dca_engine.tp_baseline import extract_dca_params_from_genome
+    g = random_candidate_genome(rng=random.Random(1), generation_index=0)
+    params = extract_dca_params_from_genome(g)
+    assert "grid_pct" in params
+    assert "max_layers" in params
+    assert "tp_pct" in params
+    assert params["tp_pct"] == g.dca_genome.grid_params["tp_pct"]
+
+
+# ============================================================
 # Test: operators — mutate
 # ============================================================
 
@@ -157,13 +221,17 @@ def test_mutate_changes_params_sometimes():
     assert changed > 0
 
 
-def test_mutate_keeps_tp_fixed():
-    """Stage 10 keeps TP fixed at parent value."""
+def test_mutate_keeps_tp_synced_with_dca():
+    """Stage 10: tp_pct is in BOTH dca_genome.grid_params and tp_genome.exit_params.
+    Mutate must keep them in sync (otherwise the Stage 9 baseline reads from
+    tp_genome and ignores the dca value)."""
     rng = random.Random(42)
-    parent = random_candidate_genome(rng=rng, generation_index=0, tp_pct=0.03)
+    parent = random_candidate_genome(rng=rng, generation_index=0)
     for _ in range(20):
         child = mutate(parent, rng=rng, mutation_rate=1.0)
-        assert child.tp_genome.exit_params["tp_pct"] == 0.03
+        dca_tp = child.dca_genome.grid_params["tp_pct"]
+        tp_genome_tp = child.tp_genome.exit_params["tp_pct"]
+        assert dca_tp == tp_genome_tp, f"TP desynced: dca={dca_tp} tp={tp_genome_tp}"
 
 
 def test_mutate_clamps_to_range():

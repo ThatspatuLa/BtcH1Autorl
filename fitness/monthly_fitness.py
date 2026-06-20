@@ -238,6 +238,7 @@ def _score_one_month(
     month_equity: pd.Series,
     month_trades: pd.DataFrame,
     candidate_id: str | None = None,
+    evolution_mode: bool = False,
 ) -> MonthlyScore:
     """Run Stage 5 compute_score on a single month's equity + trades.
 
@@ -252,6 +253,7 @@ def _score_one_month(
         trades_df=month_trades,
         settings=None,
         candidate_id=candidate_id,
+        evolution_mode=evolution_mode,
     )
     # Override "too_few_trades" rejection: walk-forward needs per-month views
     # to be scoreable even if a month has < 30 trades (the full-period score
@@ -585,6 +587,7 @@ def compute_monthly_fitness(
     trades_df: pd.DataFrame | None = None,
     candidate_id: str = "unknown",
     experiment_slug: str = "unknown",
+    evolution_mode: bool = False,
 ) -> MonthlyFitnessResult:
     """Top-level Stage 6 entry point.
 
@@ -593,6 +596,11 @@ def compute_monthly_fitness(
     3. Run Stage 5 compute_score on each month.
     4. Aggregate with locked v1 walk-forward rules.
     5. Return MonthlyFitnessResult.
+
+    evolution_mode: passed to Stage 5's compute_score, which relaxes the
+    TPM hard reject. Used by Stage 10 (DCA evolution) so the GA can see
+    and breed candidates with low TPM. The deployment gates in
+    fitness.deployment_gates still enforce TPM >= 5 at deployment time.
     """
     # Full-period score for context
     full_result = compute_score(
@@ -600,6 +608,7 @@ def compute_monthly_fitness(
         trades_df=trades_df if trades_df is not None else pd.DataFrame(),
         settings=None,
         candidate_id=candidate_id,
+        evolution_mode=evolution_mode,
     )
     if isinstance(full_result, RejectedResult):
         full_score: float | None = None
@@ -621,6 +630,7 @@ def compute_monthly_fitness(
                 month_equity=eq,
                 month_trades=trades,
                 candidate_id=candidate_id,
+                evolution_mode=evolution_mode,
             )
         )
 

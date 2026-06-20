@@ -131,6 +131,9 @@ class CandidateEvaluator:
         dca_params = extract_dca_params_from_genome(genome)
 
         # Stage 9: run backtest with fixed TP
+        # The tp_pct is read from tp_genome.exit_params["tp_pct"] by the
+        # Stage 9 baseline. Our operators (random/mutate/crossover) keep
+        # the dca_genome and tp_genome in sync.
         bt = backtest_with_fixed_tp(
             df=self.df,
             candidate_id=candidate_id,
@@ -142,11 +145,16 @@ class CandidateEvaluator:
         )
 
         # Stage 6 + 6.5: monthly fitness + deployment gates
+        # evolution_mode=True relaxes the TPM hard reject so the GA can
+        # see and breed low-TPM candidates. The deployment gates in
+        # fitness.deployment_gates still enforce TPM >= 5 at deployment
+        # time.
         fitness = compute_monthly_fitness(
             equity_curve=bt.equity_curve,
             trades_df=bt.trades_df,
             candidate_id=candidate_id,
             experiment_slug=self.experiment_slug,
+            evolution_mode=True,
         )
 
         # If monthly fitness hard-rejected, that's the final word
@@ -174,11 +182,13 @@ class CandidateEvaluator:
             )
 
         # Otherwise: also run Stage 5 directly to get the score breakdown
+        # evolution_mode=True (TPM hard reject relaxed) — see comment above.
         score_result = compute_score(
             equity_curve=bt.equity_curve,
             trades_df=bt.trades_df,
             settings=None,
             candidate_id=candidate_id,
+            evolution_mode=True,
         )
         if isinstance(score_result, RejectedResult):
             # Stage 5 rejected something Stage 6 didn't (edge case)

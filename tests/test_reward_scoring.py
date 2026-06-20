@@ -246,6 +246,44 @@ def test_empty_trades_rejected():
 # Successful scoring + DD penalty tiers
 # ============================================================
 
+def test_evolution_mode_relaxes_tpm_reject():
+    """evolution_mode=True should NOT hard-reject on TPM<5.
+
+    Same candidate, two calls: one with evolution_mode=False (deployment
+    standard) → rejected with tpm<5; one with evolution_mode=True →
+    scored (with a low tpm component, but the algorithm sees the data)."""
+    from reward.scoring import compute_score
+    # Build a slow but profitable candidate: 30 trades, 200 days → TPM 4.5
+    np.random.seed(42)
+    eq = _steady_up_equity(n_candles=24 * 200)  # 200 days of H1
+    trades_low = _steady_up_trades(n=30)
+    # Deployment standard: should reject with tpm<5 OR too_few_trades
+    dep_result = compute_score(eq, trades_low, candidate_id="tpm-deploy")
+    assert isinstance(dep_result, RejectedResult)
+    # In evolution mode: should score (or at least not reject for TPM)
+    evo_result = compute_score(eq, trades_low, candidate_id="tpm-evo", evolution_mode=True)
+    if isinstance(evo_result, RejectedResult):
+        # If rejected, the reason must NOT be tpm<5
+        assert evo_result.reason != "tpm<5", \
+            f"evolution_mode should relax tpm<5, got: {evo_result.reason}"
+
+
+def test_evolution_mode_preserves_safety_rejects():
+    """evolution_mode=True should still hard-reject on safety issues.
+
+    - net_profit<=0
+    - drawdown>35%
+    - invalid_data
+    """
+    from reward.scoring import compute_score
+    # Losing equity → should still reject with net_profit<=0
+    eq = _losing_equity(n_candles=24 * 200)
+    trades = _steady_up_trades(n=100)
+    result = compute_score(eq, trades, candidate_id="losing-evo", evolution_mode=True)
+    assert isinstance(result, RejectedResult)
+    assert result.reason == "net_profit<=0"
+
+
 def test_good_candidate_scores_successfully():
     """Steady upward equity + many trades → ScoreResult with high score."""
     np.random.seed(42)

@@ -136,8 +136,25 @@ def _check_hard_rejects(
     initial_deposit: float,
     final_equity: float,
     total_trades: int,
+    evolution_mode: bool = False,
 ) -> str | None:
-    """Returns reason string if hard reject, else None."""
+    """Returns reason string if hard reject, else None.
+
+    Hard rejects that ALWAYS block (even in evolution):
+    - invalid initial_deposit / final_equity (NaN/inf)
+    - net_profit_pct <= 0
+    - max_drawdown > 35%
+    - total_trades < 30
+
+    Softened in evolution_mode (still tracked by the TPM component weight
+    in REWARD_WEIGHTS, just not a hard reject):
+    - trades_per_month < 5  → only enforced when not evolution_mode
+
+    This is the Stage 5 counterpart of the Stage 6.5 discovery/deployment
+    split: during evolution, the GA can see and breed candidates with low
+    TPM (they'll get a low tpm_component_score in the final score anyway).
+    At deployment time, the deployment_gates check enforces TPM >= 5.
+    """
     if not _is_finite(initial_deposit) or not _is_finite(final_equity):
         return "invalid_data"
     if not _is_finite(net_profit_pct) or not _is_finite(max_dd_pct):
@@ -146,7 +163,8 @@ def _check_hard_rejects(
         return "net_profit<=0"
     if max_dd_pct > MAX_DD_PCT:
         return "drawdown>35%"
-    if trades_per_month < MIN_TPM:
+    # TPM hard reject — relaxed in evolution mode
+    if not evolution_mode and trades_per_month < MIN_TPM:
         return "tpm<5"
     if total_trades < MIN_TOTAL_TRADES:
         return "too_few_trades"
@@ -319,11 +337,18 @@ def compute_score(
     trades_df: pd.DataFrame | None,
     settings: Any | None = None,
     candidate_id: str | None = None,
+    evolution_mode: bool = False,
 ) -> ScoreResult | RejectedResult:
     """Main entry point. Returns ScoreResult if scored, RejectedResult if hard-rejected.
 
     settings: optional Settings object (used for context like experiment_slug).
               Not required for scoring — just for traceability.
+
+    evolution_mode: if True, the TPM hard reject is relaxed. Use during GA
+    evolution so the algorithm can see and breed candidates with low TPM
+    (the TPM component weight in REWARD_WEIGHTS still penalises them).
+    At deployment time, keep evolution_mode=False so the standard
+    is preserved.
     """
     metrics = _compute_metrics(equity_curve, trades_df if trades_df is not None else pd.DataFrame())
 
@@ -337,6 +362,7 @@ def compute_score(
         initial_deposit=metrics["initial_deposit"],
         final_equity=metrics["final_equity"],
         total_trades=metrics["total_trades"],
+        evolution_mode=evolution_mode,
     )
     if reject_reason is not None:
         return RejectedResult(

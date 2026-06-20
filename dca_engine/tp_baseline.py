@@ -158,22 +158,23 @@ def backtest_with_fixed_tp(
 
 
 def extract_dca_params_from_genome(genome: CandidateGenome | DcaGenome) -> dict[str, Any]:
-    """Extract the Stage-9-relevant DCA params from a CandidateGenome or DcaGenome.
+    """Extract the Stage-9-relevant params from a CandidateGenome or DcaGenome.
 
-    Stage 9 only uses (grid_pct, max_layers). Real DCA methods from
-    Stage 8 (atr, volatility, etc.) require indicators that the
-    Stage 3 OrderManager doesn't compute. Stage 10 will replace
-    OrderManager entirely; for now we use a simpler model.
+    Reads from dca_genome.grid_params:
+    - "pct" → grid_pct
+    - "max_layers" → max_layers (also dca_genome.max_dca_layers for back-compat)
+    - "tp_pct" → tp_pct (carried in the genome, read by Stage 9 baseline)
 
-    For this version: we map the dca_genome.grid_params["pct"] to grid_pct
-    if grid_method is "fixed_pct", else use a default of 0.015.
+    Stage 9 only supports fixed_pct. Other grid_methods fall back to a
+    default of 0.015 because the OrderManager can't compute indicators.
+    Stage 10 (the full wiring) is a separate stage.
     """
     dca = genome.dca_genome if isinstance(genome, CandidateGenome) else genome
     grid_pct = 0.015  # default fallback
     if dca.grid_method.value == "fixed_pct":
         grid_pct = float(dca.grid_params.get("pct", 0.015))
-    # If grid_method is something else (atr, volatility, etc.), we can't
-    # compute indicators here yet. Fall back to fixed_pct with default.
-    # Stage 10 will wire Stage 8 grid spacing properly.
-    max_layers = int(dca.max_dca_layers)
-    return {"grid_pct": grid_pct, "max_layers": max_layers}
+    max_layers = int(
+        dca.grid_params.get("max_layers", dca.max_dca_layers)
+    )
+    tp_pct = float(dca.grid_params.get("tp_pct", 0.02))
+    return {"grid_pct": grid_pct, "max_layers": max_layers, "tp_pct": tp_pct}
