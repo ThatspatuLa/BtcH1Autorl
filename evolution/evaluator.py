@@ -96,7 +96,7 @@ class CandidateEvaluator:
         """
         t0 = time.time()
         try:
-            return self._evaluate_safe(genome, candidate_id, t0)
+            return _evaluate_one(self.df, genome, candidate_id, self.experiment_slug, t0)
         except Exception as e:
             return EvaluationResult(
                 candidate_id=candidate_id,
@@ -121,105 +121,48 @@ class CandidateEvaluator:
                 error=str(e),
             )
 
-    def _evaluate_safe(
-        self,
-        genome: CandidateGenome,
-        candidate_id: str,
-        t0: float,
-    ) -> EvaluationResult:
-        # Extract DCA params from genome
-        dca_params = extract_dca_params_from_genome(genome)
 
-        # Stage 9: run backtest with fixed TP
-        # The tp_pct is read from tp_genome.exit_params["tp_pct"] by the
-        # Stage 9 baseline. Our operators (random/mutate/crossover) keep
-        # the dca_genome and tp_genome in sync.
-        # Confirmation indicators are passed through from the genome.
-        bt = backtest_with_fixed_tp(
-            df=self.df,
-            candidate_id=candidate_id,
-            genome_id=genome.genome_id,
-            experiment_id=self.experiment_slug,
-            tp_genome=genome.tp_genome,
-            grid_pct=dca_params["grid_pct"],
-            max_layers=dca_params["max_layers"],
-            confirmation_indicators=dca_params.get("confirmation_indicators", []),
-            indicator_params=dca_params.get("indicator_params", {}),
-            cooldown_candles=dca_params.get("cooldown_candles", 0),
-            grid_method=dca_params.get("grid_method", "fixed_pct"),
-            grid_params=dca_params.get("grid_params"),
-        )
+def _evaluate_one(
+    df: pd.DataFrame,
+    genome: CandidateGenome,
+    candidate_id: str,
+    experiment_slug: str,
+    t0: float,
+) -> EvaluationResult:
+    """Module-level evaluation function — picklable for ProcessPoolExecutor.
 
-        # Stage 6 + 6.5: monthly fitness + deployment gates
-        # evolution_mode=True relaxes the TPM hard reject so the GA can
-        # see and breed low-TPM candidates. The deployment gates in
-        # fitness.deployment_gates still enforce TPM >= 5 at deployment
-        # time.
-        fitness = compute_monthly_fitness(
-            equity_curve=bt.equity_curve,
-            trades_df=bt.trades_df,
-            candidate_id=candidate_id,
-            experiment_slug=self.experiment_slug,
-            evolution_mode=True,
-        )
+    All the actual evaluation logic lives here so it can be called from
+    worker processes.
+    """
+    # Extract DCA params from genome
+    dca_params = extract_dca_params_from_genome(genome)
 
-        # If monthly fitness hard-rejected, that's the final word
-        if fitness.rejected:
-            return EvaluationResult(
-                candidate_id=candidate_id,
-                genome_id=genome.genome_id,
-                discovery_fitness=fitness.discovery_fitness,
-                deployment_fitness=fitness.deployment_fitness,
-                deployment_pass=fitness.deployment_pass,
-                failed_deployment_gates=fitness.failed_deployment_gates,
-                closest_to_passing_score=fitness.closest_to_passing_score,
-                consistency_ratio=fitness.consistency_ratio,
-                consistency_multiplier=fitness.consistency_multiplier,
-                rejected=True,
-                reject_reason=fitness.reject_reason or "unknown",
-                rejection_source="monthly_fitness",
-                elapsed_seconds=time.time() - t0,
-                monthly_fitness=fitness,
-                score_breakdown=None,
-                raw_metrics={},
-                n_cycles_closed=bt.n_cycles_closed,
-                final_equity=bt.final_equity,
-                max_dd_pct=_extract_max_dd(bt, fitness),
-            )
+    # Stage 9: run backtest with fixed TP
+    bt = backtest_with_fixed_tp(
+        df=df,
+        candidate_id=candidate_id,
+        genome_id=genome.genome_id,
+        experiment_id=experiment_slug,
+        tp_genome=genome.tp_genome,
+        grid_pct=dca_params["grid_pct"],
+        max_layers=dca_params["max_layers"],
+        confirmation_indicators=dca_params.get("confirmation_indicators", []),
+        indicator_params=dca_params.get("indicator_params", {}),
+        cooldown_candles=dca_params.get("cooldown_candles", 0),
+        grid_method=dca_params.get("grid_method", "fixed_pct"),
+        grid_params=dca_params.get("grid_params"),
+    )
 
-        # Otherwise: also run Stage 5 directly to get the score breakdown
-        # evolution_mode=True (TPM hard reject relaxed) — see comment above.
-        score_result = compute_score(
-            equity_curve=bt.equity_curve,
-            trades_df=bt.trades_df,
-            settings=None,
-            candidate_id=candidate_id,
-            evolution_mode=True,
-        )
-        if isinstance(score_result, RejectedResult):
-            # Stage 5 rejected something Stage 6 didn't (edge case)
-            return EvaluationResult(
-                candidate_id=candidate_id,
-                genome_id=genome.genome_id,
-                discovery_fitness=fitness.discovery_fitness,
-                deployment_fitness=fitness.deployment_fitness,
-                deployment_pass=fitness.deployment_pass,
-                failed_deployment_gates=fitness.failed_deployment_gates,
-                closest_to_passing_score=fitness.closest_to_passing_score,
-                consistency_ratio=fitness.consistency_ratio,
-                consistency_multiplier=fitness.consistency_multiplier,
-                rejected=True,
-                reject_reason=score_result.reason,
-                rejection_source="score",
-                elapsed_seconds=time.time() - t0,
-                monthly_fitness=fitness,
-                score_breakdown=None,
-                raw_metrics=dict(score_result.raw_metrics),
-                n_cycles_closed=bt.n_cycles_closed,
-                final_equity=bt.final_equity,
-                max_dd_pct=_extract_max_dd(bt, fitness),
-            )
+    # Stage 6 + 6.5: monthly fitness + deployment gates
+    fitness = compute_monthly_fitness(
+        equity_curve=bt.equity_curve,
+        trades_df=bt.trades_df,
+        candidate_id=candidate_id,
+        experiment_slug=experiment_slug,
+        evolution_mode=True,
+    )
 
+    if fitness.rejected:
         return EvaluationResult(
             candidate_id=candidate_id,
             genome_id=genome.genome_id,
@@ -230,17 +173,69 @@ class CandidateEvaluator:
             closest_to_passing_score=fitness.closest_to_passing_score,
             consistency_ratio=fitness.consistency_ratio,
             consistency_multiplier=fitness.consistency_multiplier,
-            rejected=False,
-            reject_reason=None,
-            rejection_source=None,
+            rejected=True,
+            reject_reason=fitness.reject_reason or "unknown",
+            rejection_source="monthly_fitness",
             elapsed_seconds=time.time() - t0,
             monthly_fitness=fitness,
-            score_breakdown=score_result.breakdown.to_dict() if isinstance(score_result, ScoreResult) else None,
-            raw_metrics=score_result.raw_metrics if isinstance(score_result, ScoreResult) else {},
+            score_breakdown=None,
+            raw_metrics={},
             n_cycles_closed=bt.n_cycles_closed,
             final_equity=bt.final_equity,
             max_dd_pct=_extract_max_dd(bt, fitness),
         )
+
+    score_result = compute_score(
+        equity_curve=bt.equity_curve,
+        trades_df=bt.trades_df,
+        settings=None,
+        candidate_id=candidate_id,
+        evolution_mode=True,
+    )
+    if isinstance(score_result, RejectedResult):
+        return EvaluationResult(
+            candidate_id=candidate_id,
+            genome_id=genome.genome_id,
+            discovery_fitness=fitness.discovery_fitness,
+            deployment_fitness=fitness.deployment_fitness,
+            deployment_pass=fitness.deployment_pass,
+            failed_deployment_gates=fitness.failed_deployment_gates,
+            closest_to_passing_score=fitness.closest_to_passing_score,
+            consistency_ratio=fitness.consistency_ratio,
+            consistency_multiplier=fitness.consistency_multiplier,
+            rejected=True,
+            reject_reason=score_result.reason,
+            rejection_source="score",
+            elapsed_seconds=time.time() - t0,
+            monthly_fitness=fitness,
+            score_breakdown=None,
+            raw_metrics=dict(score_result.raw_metrics),
+            n_cycles_closed=bt.n_cycles_closed,
+            final_equity=bt.final_equity,
+            max_dd_pct=_extract_max_dd(bt, fitness),
+        )
+
+    return EvaluationResult(
+        candidate_id=candidate_id,
+        genome_id=genome.genome_id,
+        discovery_fitness=fitness.discovery_fitness,
+        deployment_fitness=fitness.deployment_fitness,
+        deployment_pass=fitness.deployment_pass,
+        failed_deployment_gates=fitness.failed_deployment_gates,
+        closest_to_passing_score=fitness.closest_to_passing_score,
+        consistency_ratio=fitness.consistency_ratio,
+        consistency_multiplier=fitness.consistency_multiplier,
+        rejected=False,
+        reject_reason=None,
+        rejection_source=None,
+        elapsed_seconds=time.time() - t0,
+        monthly_fitness=fitness,
+        score_breakdown=score_result.breakdown.to_dict() if isinstance(score_result, ScoreResult) else None,
+        raw_metrics=score_result.raw_metrics if isinstance(score_result, ScoreResult) else {},
+        n_cycles_closed=bt.n_cycles_closed,
+        final_equity=bt.final_equity,
+        max_dd_pct=_extract_max_dd(bt, fitness),
+    )
 
 
 def _extract_max_dd(bt: Any, fitness: MonthlyFitnessResult) -> float:

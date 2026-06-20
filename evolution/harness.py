@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import contextlib
 import json
+import multiprocessing as mp
 import random
 import signal
 import time
 import traceback
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,7 +33,7 @@ from typing import Any
 import pandas as pd
 
 from evolution.config import EvolutionConfig
-from evolution.evaluator import CandidateEvaluator, EvaluationResult
+from evolution.evaluator import CandidateEvaluator, EvaluationResult, _evaluate_one
 from evolution.operators import crossover, mutate, random_candidate_genome
 from evolution.persistence import (
     GenerationHistory,
@@ -238,15 +240,71 @@ class EvolutionHarness:
         else:
             candidates = self._generate_next_gen(history, rng, gen_idx)
 
-        # 2) Evaluate each
+        # 2) Evaluate each — parallel via ProcessPoolExecutor
         results: list[EvaluationResult] = []
-        for cand in candidates:
-            history.candidate_counter += 1
-            cand_id = f"cand_{history.candidate_counter:06d}"
-            res = self.evaluator.evaluate(cand, cand_id)
-            results.append(res)
-            if self.hooks.on_candidate_evaluated:
-                self.hooks.on_candidate_evaluated(res)
+        n_workers = max(1, self.config.parallel_workers)
+
+        if n_workers == 1:
+            # Sequential (debugging / single-core mode)
+            for cand in candidates:
+                history.candidate_counter += 1
+                cand_id = f"cand_{history.candidate_counter:06d}"
+                res = self.evaluator.evaluate(cand, cand_id)
+                results.append(res)
+                if self.hooks.on_candidate_evaluated:
+                    self.hooks.on_candidate_evaluated(res)
+        else:
+            # Parallel: spawn workers, each gets a copy of the dataframe
+            # Pickle df once and pass to each worker
+            ctx = mp.get_context("spawn")  # safer than fork on Linux
+            with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+                # Submit all jobs
+                futures = {}
+                for cand in candidates:
+                    history.candidate_counter += 1
+                    cand_id = f"cand_{history.candidate_counter:06d}"
+                    fut = pool.submit(
+                        _evaluate_one,
+                        self.df,
+                        cand,
+                        cand_id,
+                        self.config.experiment_id,
+                        time.time(),
+                    )
+                    futures[fut] = cand_id
+
+                # Collect results as they complete
+                for fut in as_completed(futures):
+                    try:
+                        res = fut.result()
+                    except Exception as e:
+                        # Worker crashed — log and continue
+                        cand_id = futures[fut]
+                        res = EvaluationResult(
+                            candidate_id=cand_id,
+                            genome_id=cand_id,
+                            discovery_fitness=0.0,
+                            deployment_fitness=0.0,
+                            deployment_pass=False,
+                            failed_deployment_gates=["worker_error"],
+                            closest_to_passing_score=0.0,
+                            consistency_ratio=0.0,
+                            consistency_multiplier=0.0,
+                            rejected=True,
+                            reject_reason="worker_error",
+                            rejection_source="worker",
+                            elapsed_seconds=0.0,
+                            monthly_fitness=self._empty_fitness(cand_id),
+                            score_breakdown=None,
+                            raw_metrics={},
+                            n_cycles_closed=0,
+                            final_equity=0.0,
+                            max_dd_pct=1.0,
+                            error=str(e),
+                        )
+                    results.append(res)
+                    if self.hooks.on_candidate_evaluated:
+                        self.hooks.on_candidate_evaluated(res)
 
         # 3) Sort + select. With the discovery/deployment split:
         #    - "passed" = not hard-rejected (eligible for breeding, with non-zero
@@ -418,6 +476,36 @@ class EvolutionHarness:
             )
 
         return children[:target]
+
+    def _empty_fitness(self, candidate_id: str):
+        """Empty MonthlyFitnessResult for error cases."""
+        from fitness.monthly_fitness import MonthlyFitnessResult
+        return MonthlyFitnessResult(
+            candidate_id=candidate_id,
+            experiment_slug=self.config.experiment_id,
+            monthly_scores=[],
+            n_months=0,
+            n_profitable_months=0,
+            n_rejected_months=0,
+            consistency_ratio=0.0,
+            median_monthly_score=0.0,
+            worst_month_score=0.0,
+            stddev_monthly_score=0.0,
+            variance_penalty=0.0,
+            worst_floor_multiplier=0.0,
+            base_aggregate_fitness=0.0,
+            discovery_fitness=0.0,
+            consistency_multiplier=0.0,
+            deployment_fitness=0.0,
+            deployment_pass=False,
+            failed_deployment_gates=["evaluation_error"],
+            closest_to_passing_score=0.0,
+            final_fitness=0.0,
+            rejected=True,
+            reject_reason="no_data",
+            full_period_score=None,
+            full_period_rejected=True,
+        )
 
     def _load_elite_genomes(
         self,
