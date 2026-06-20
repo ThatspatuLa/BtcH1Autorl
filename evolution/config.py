@@ -1,0 +1,120 @@
+"""EvolutionConfig — single source of truth for the GA loop.
+
+All stop conditions and parameters are configurable here. v1 defaults
+are locked per Kanban (8h wall-time, 20 generations, stagnation = 5 gens).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+# Locked v1 defaults — do not evolve
+DEFAULT_WALL_TIME_SECONDS: int = 8 * 60 * 60        # 8 hours
+DEFAULT_MAX_GENERATIONS: int = 20
+DEFAULT_STAGNATION_GENERATIONS: int = 5             # stop if no improvement for 5 gens
+DEFAULT_ALL_REJECTED_GENERATIONS: int = 3           # stop if all rejected for 3 gens
+DEFAULT_CANDIDATES_PER_GEN: int = 500               # LOCKED
+DEFAULT_ELITE_COUNT: int = 20                       # top 4% survive
+DEFAULT_RANDOM_INJECTION: int = 120                 # fresh random per gen
+DEFAULT_MUTATION_RATE: float = 0.30                # chance any single param mutates
+DEFAULT_CROSSOVER_RATE: float = 0.50               # fraction of children from crossover
+DEFAULT_PARALLEL_WORKERS: int = 8                  # process pool size
+
+
+@dataclass
+class EvolutionConfig:
+    """All knobs for the evolution loop."""
+    # Population
+    candidates_per_gen: int = DEFAULT_CANDIDATES_PER_GEN
+    elite_count: int = DEFAULT_ELITE_COUNT
+    random_injection: int = DEFAULT_RANDOM_INJECTION
+    # Genetic operators
+    mutation_rate: float = DEFAULT_MUTATION_RATE
+    crossover_rate: float = DEFAULT_CROSSOVER_RATE
+    # Stop conditions (any of these halts the run)
+    wall_time_seconds: int = DEFAULT_WALL_TIME_SECONDS
+    max_generations: int = DEFAULT_MAX_GENERATIONS
+    stagnation_generations: int = DEFAULT_STAGNATION_GENERATIONS
+    all_rejected_generations: int = DEFAULT_ALL_REJECTED_GENERATIONS
+    # Parallelism
+    parallel_workers: int = DEFAULT_PARALLEL_WORKERS
+    # Reproducibility
+    base_seed: int = 42
+    # Paths
+    output_dir: str = "results/evolution"
+    experiment_id: str = "exp_default"
+    # Reporting
+    leaderboard_top_n: int = 20
+    # Stage 9 specific
+    tp_pct: float = 0.02  # the locked fixed-TP baseline value
+
+    def __post_init__(self) -> None:
+        if self.candidates_per_gen < 1:
+            raise ValueError("candidates_per_gen must be >= 1")
+        if self.elite_count < 1:
+            raise ValueError("elite_count must be >= 1")
+        if self.elite_count > self.candidates_per_gen:
+            raise ValueError("elite_count must be <= candidates_per_gen")
+        if self.random_injection < 0:
+            raise ValueError("random_injection must be >= 0")
+        if not 0 <= self.mutation_rate <= 1:
+            raise ValueError("mutation_rate must be in [0, 1]")
+        if not 0 <= self.crossover_rate <= 1:
+            raise ValueError("crossover_rate must be in [0, 1]")
+        if self.wall_time_seconds < 60:
+            raise ValueError("wall_time_seconds must be >= 60")
+        if self.max_generations < 1:
+            raise ValueError("max_generations must be >= 1")
+        if self.stagnation_generations < 1:
+            raise ValueError("stagnation_generations must be >= 1")
+        if self.parallel_workers < 1:
+            raise ValueError("parallel_workers must be >= 1")
+
+    # Children per generation = elites (carried) + mutated/crossover + random
+    @property
+    def children_per_gen(self) -> int:
+        return self.candidates_per_gen - self.elite_count - self.random_injection
+
+    @property
+    def crossover_children(self) -> int:
+        return int(self.children_per_gen * self.crossover_rate)
+
+    @property
+    def mutation_children(self) -> int:
+        return self.children_per_gen - self.crossover_children
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "candidates_per_gen": self.candidates_per_gen,
+            "elite_count": self.elite_count,
+            "random_injection": self.random_injection,
+            "mutation_rate": self.mutation_rate,
+            "crossover_rate": self.crossover_rate,
+            "wall_time_seconds": self.wall_time_seconds,
+            "max_generations": self.max_generations,
+            "stagnation_generations": self.stagnation_generations,
+            "all_rejected_generations": self.all_rejected_generations,
+            "parallel_workers": self.parallel_workers,
+            "base_seed": self.base_seed,
+            "tp_pct": self.tp_pct,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> EvolutionConfig:
+        return cls(
+            candidates_per_gen=d.get("candidates_per_gen", DEFAULT_CANDIDATES_PER_GEN),
+            elite_count=d.get("elite_count", DEFAULT_ELITE_COUNT),
+            random_injection=d.get("random_injection", DEFAULT_RANDOM_INJECTION),
+            mutation_rate=d.get("mutation_rate", DEFAULT_MUTATION_RATE),
+            crossover_rate=d.get("crossover_rate", DEFAULT_CROSSOVER_RATE),
+            wall_time_seconds=d.get("wall_time_seconds", DEFAULT_WALL_TIME_SECONDS),
+            max_generations=d.get("max_generations", DEFAULT_MAX_GENERATIONS),
+            stagnation_generations=d.get("stagnation_generations", DEFAULT_STAGNATION_GENERATIONS),
+            all_rejected_generations=d.get("all_rejected_generations", DEFAULT_ALL_REJECTED_GENERATIONS),
+            parallel_workers=d.get("parallel_workers", DEFAULT_PARALLEL_WORKERS),
+            base_seed=d.get("base_seed", 42),
+            tp_pct=d.get("tp_pct", 0.02),
+            output_dir=d.get("output_dir", "results/evolution"),
+            experiment_id=d.get("experiment_id", "exp_default"),
+            leaderboard_top_n=d.get("leaderboard_top_n", 20),
+        )

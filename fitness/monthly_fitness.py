@@ -170,8 +170,14 @@ def _slice_by_month(
     if trades_df is not None and not trades_df.empty:
         trades_df_coerced = trades_df.copy()
         for col in ("open_time", "close_time"):
-            if col in trades_df_coerced.columns and not pd.api.types.is_datetime64_any_dtype(trades_df_coerced[col]):
-                trades_df_coerced[col] = pd.to_datetime(trades_df_coerced[col])
+            if col in trades_df_coerced.columns:
+                col_series = trades_df_coerced[col]
+                if not pd.api.types.is_datetime64_any_dtype(col_series):
+                    col_series = pd.to_datetime(col_series)
+                # Strip TZ to match the localized equity_curve
+                if isinstance(col_series.dtype, pd.DatetimeTZDtype) or (hasattr(col_series.dtype, "tz") and col_series.dtype.tz is not None):
+                    col_series = col_series.dt.tz_localize(None)
+                trades_df_coerced[col] = col_series
     for period, group in grouped:
         if len(group) < 2:
             continue

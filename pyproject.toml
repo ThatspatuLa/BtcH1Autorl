@@ -10,7 +10,13 @@ markers = [
     "stage3: Stage 3 DCA engine tests",
     "stage4: Stage 4 genome schema tests",
     "stage5: Stage 5 reward engine tests",
+    "stage6: Stage 6 monthly fitness tests",
+    "stage7: Stage 7 safety engine tests",
+    "stage8: Stage 8 DCA calculation tests",
+    "stage9: Stage 9 fixed TP baseline tests",
+    "stage11: Stage 11 TP calculation tests",
     "stage15: Stage 15 reporting tests",
+    "stage_evolution: Evolution harness tests",
     "integration: cross-stage integration tests",
 ]
 
@@ -42,3 +48,4 @@ ignore = [
 "safety/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
 "dca_calc/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
 "tp_calc/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
+"evolution/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]

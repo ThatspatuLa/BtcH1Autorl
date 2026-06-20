@@ -16,7 +16,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import pandas as pd  # noqa: E402
 
 from dca_engine import backtest_candidate  # noqa: E402
-from reward import RejectedResult, ScoreResult, compute_score  # noqa: E402
+from reward import ScoreResult, compute_score  # noqa: E402
 
 
 def main() -> int:
