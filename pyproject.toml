@@ -1,0 +1,33 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-ra --strict-markers --tb=short"
+markers = [
+    "stage1: Stage 1 foundation tests (config + ID + metadata)",
+    "stage2: Stage 2 data pipeline tests",
+    "stage3: Stage 3 DCA skeleton tests",
+    "stage4: Stage 4 genome schema tests",
+    "stage5: Stage 5 reward engine tests",
+    "integration: cross-stage integration tests",
+]
+
+[tool.coverage.run]
+source = ["configs"]
+omit = ["tests/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    "E501",  # line length (handled by formatter)
+    "B008",  # function call in default argument (used for dataclass defaults)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B", "N"]

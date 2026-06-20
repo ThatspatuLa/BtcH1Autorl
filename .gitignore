@@ -1,0 +1,49 @@
+# Byte-compiled
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Test caches
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# === Project-specific ===
+# Per-experiment run outputs (regenerable from code + data)
+results/*
+!results/.gitkeep
+
+# Per-experiment logs
+logs/*
+!logs/.gitkeep
+
+# Downloaded data (regenerable from sources)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Generated genomes (only examples are committed)
+genomes/*.json
+!genomes/examples/*.json

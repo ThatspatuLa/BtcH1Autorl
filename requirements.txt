@@ -1,0 +1,27 @@
+# BTC H1 AutoRL — Python dependencies
+# Pin versions for reproducibility. venv: /home/spatula/freqtrade/.venv
+# All deps verified compatible with freqtrade 2026.5.1 + Python 3.11.15
+
+# --- Core framework ---
+freqtrade==2026.5.1
+freqtrade-client==2026.5.1
+
+# --- Data + numerics ---
+pandas==3.0.3
+numpy==2.4.6
+
+# --- Technical analysis ---
+ta==0.11.0
+ft-pandas-ta==0.3.16
+TA-Lib==0.6.8
+
+# --- Visualisation (Phase 2 reporting) ---
+plotly==5.24.1
+
+# --- Serialisation ---
+msgpack==1.1.0
+
+# --- Testing + lint ---
+pytest==8.3.4
+pytest-cov==6.0.0
+ruff==0.7.9

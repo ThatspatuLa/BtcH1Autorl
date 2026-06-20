@@ -1,0 +1,30 @@
+{
+  "_schema_version": "1.0.0",
+  "_description": "Custom research-engine config — controls evolution runner, NOT Freqtrade. Used by Settings loader to merge into final Settings object.",
+
+  "candidates_per_gen": 500,
+  "parallel_workers": 8,
+  "base_seed": 42,
+  "sqlite_path": "/home/spatula/Projects/BtcH1Autorl/results/research.db",
+  "results_dir": "/home/spatula/Projects/BtcH1Autorl/results",
+  "logs_dir": "/home/spatula/Projects/BtcH1Autorl/logs",
+  "genomes_dir": "/home/spatula/Projects/BtcH1Autorl/genomes",
+  "data_processed_dir": "/home/spatula/Projects/BtcH1Autorl/data/processed",
+  "data_metadata_dir": "/home/spatula/Projects/BtcH1Autorl/data/metadata",
+
+  "max_generations_cap": 20,
+  "convergence_patience_gens": 5,
+  "stagnation_patience_gens": 5,
+  "fresh_blood_pct": 0.20,
+  "mutation_rate_boost_on_stag": 1.5,
+
+  "tp_parents_top_k": 5,
+  "tp_combination_top_k": 5,
+  "tp_combination_top_l": 10,
+  "joint_evolution_elite_n": 20,
+  "joint_evolution_mutate_n": 360,
+  "joint_evolution_fresh_n": 120,
+  "stress_test_top_n": 10,
+
+  "wall_time_budget_seconds": 28800
+}

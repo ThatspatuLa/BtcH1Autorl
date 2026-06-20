@@ -1,0 +1,31 @@
+{
+  "_schema_version": "1.0.0",
+  "_description": "Experiment-level overrides applied ON TOP of configs/freqtrade/config.json. Each experiment can override any field. Settings loader merges both into immutable Settings object.",
+  "_used_by": "configs.loader.Settings.from_files(freqtrade_path, experiment_path, research_path)",
+
+  "experiment_slug": "default_dca_v1",
+  "experiment_description": "BTC H1 Weighted DCA evolution — baseline 5x leverage, $10k starting balance, isolated margin",
+
+  "starting_balance": 10000.0,
+  "leverage": 5.0,
+  "margin_mode": "isolated",
+  "maintenance_margin_pct": 0.005,
+  "liquidation_buffer_pct": 0.05,
+
+  "contract_size": 1.0,
+  "min_trade_size": 0.0001,
+  "stake_precision": 2,
+  "amount_precision": 6,
+
+  "fee_pct": 0.0006,
+  "spread_pips": 5.0,
+  "slippage_pct": 0.0005,
+  "funding_rate_per_8h": 0.0001,
+  "overnight_cost_model": "funding_rate",
+
+  "buffer_pct": 0.20,
+  "wall_time_budget_seconds": 28800,
+
+  "dry_run": true,
+  "log_level": "INFO"
+}
