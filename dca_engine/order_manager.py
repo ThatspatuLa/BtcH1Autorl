@@ -4,15 +4,18 @@ Stage 3 placeholder logic:
 - If no open position: emit "open" decision when trigger price reached (initial entry)
 - If open position: emit "add_layer" when price drops by `grid_pct` from average entry, up to `max_layers`
 - Emit "close" when current price >= average_entry × (1 + tp_pct)
-- Confirmations: Stage 3 ignores confirmation indicators (price-only trigger)
+- Confirmations: checked when indicators + confirmation_indicators are provided
 
-Stage 8 will swap this for real grid_method / allocation_method / combo_method logic.
+Stage 8 wiring: confirmation_indicators + indicators_df enable gating.
 Stage 11 will swap close logic for real tp_genome.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Optional
+
+from dca_engine.indicators import IndicatorSnapshot
 
 
 class OrderAction(StrEnum):
@@ -32,14 +35,16 @@ class OrderDecision:
 
 
 class OrderManager:
-    """Stage 3 placeholder — real logic comes in Stages 8 + 11.
+    """Order manager with optional confirmation gating.
 
     Args:
         grid_pct: spacing between DCA layers as % of average_entry (e.g. 0.015 = 1.5%)
         tp_pct: take-profit as % of average_entry (e.g. 0.02 = 2%)
-        max_layers: max number of DCA layers per cycle (Stage 3 hardcoded to 3)
+        max_layers: max number of DCA layers per cycle
         symbol: trading pair (default "BTC/USDT")
-        min_trade_qty: minimum qty for a layer (Stage 3 = 0.001 BTC)
+        min_trade_qty: minimum qty for a layer (default 0.001 BTC)
+        confirmation_indicators: list of indicator names to gate on (empty = no gating)
+        indicator_params: dict of {indicator_name: {param: value}} for threshold overrides
     """
 
     def __init__(
@@ -49,6 +54,8 @@ class OrderManager:
         max_layers: int = 3,
         symbol: str = "BTC/USDT",
         min_trade_qty: float = 0.001,
+        confirmation_indicators: list[str] | None = None,
+        indicator_params: dict[str, dict[str, float]] | None = None,
     ) -> None:
         if grid_pct <= 0:
             raise ValueError(f"grid_pct must be > 0, got {grid_pct}")
@@ -61,6 +68,32 @@ class OrderManager:
         self.max_layers = max_layers
         self.symbol = symbol
         self.min_trade_qty = min_trade_qty
+        self.confirmation_indicators = confirmation_indicators or []
+        self.indicator_params = indicator_params or {}
+
+    def _check_confirmations(
+        self,
+        indicators: IndicatorSnapshot,
+        current_price: float,
+    ) -> tuple[bool, list[str]]:
+        """Check all confirmation indicators. Returns (all_passed, failed_list)."""
+        from dca_calc.confirmation import ConfirmationContext, check_all_confirmations
+
+        if not self.confirmation_indicators:
+            return True, []
+
+        ctx = ConfirmationContext(
+            rsi_value=indicators.rsi,
+            ma_value=indicators.ma,
+            current_price=current_price,
+            volatility=indicators.volatility,
+            reference_vol=indicators.reference_vol,
+        )
+        return check_all_confirmations(
+            indicators=self.confirmation_indicators,
+            params_map=self.indicator_params,
+            ctx=ctx,
+        )
 
     def decide(
         self,
@@ -71,13 +104,31 @@ class OrderManager:
         average_entry: float,
         has_open_position: bool,
         stake_amount: float,
+        indicators: Optional[IndicatorSnapshot] = None,
     ) -> OrderDecision:
         """Decide what to do this candle.
+
+        When confirmation_indicators are configured, they act as an AND gate:
+        all must pass before a new cycle can open or a layer can be added.
+        TP close is NEVER gated by confirmations (always closes when TP hit).
+
+        Args:
+            indicators: pre-computed indicator snapshot for this candle.
+                        If None and confirmations are configured, the check
+                        is skipped (fail-open for safety during transition).
 
         Returns an OrderDecision; caller (state_machine) executes it.
         """
         # 1) No open position → check if we should OPEN
         if not has_open_position:
+            # Check confirmations before opening
+            if self.confirmation_indicators and indicators is not None:
+                passed, failed = self._check_confirmations(indicators, current_price)
+                if not passed:
+                    return OrderDecision(
+                        action=OrderAction.NONE,
+                        reason=f"confirmation_failed:{','.join(failed)}",
+                    )
             qty = stake_amount / current_price
             if qty < self.min_trade_qty:
                 return OrderDecision(action=OrderAction.NONE, reason="qty_below_min")
@@ -90,9 +141,9 @@ class OrderManager:
             )
 
         # 2) Open position → check if we should CLOSE (TP hit)
+        # TP close is NEVER gated by confirmations
         tp_target = average_entry * (1.0 + self.tp_pct)
         if current_price >= tp_target:
-            # Close entire position
             return OrderDecision(
                 action=OrderAction.CLOSE_CYCLE,
                 cycle_id=cycle_id,
@@ -105,9 +156,16 @@ class OrderManager:
         if position_layers >= self.max_layers:
             return OrderDecision(action=OrderAction.NONE, reason="max_layers_reached")
 
+        # Check confirmations before adding layer
+        if self.confirmation_indicators and indicators is not None:
+            passed, failed = self._check_confirmations(indicators, current_price)
+            if not passed:
+                return OrderDecision(
+                    action=OrderAction.NONE,
+                    reason=f"confirmation_failed:{','.join(failed)}",
+                )
+
         # Trigger if price dropped grid_pct × layers_filled from average_entry
-        # Layer 1 (initial) is filled. For layer 2, trigger = -grid_pct from layer 1 price.
-        # Stage 3 uses a simpler model: next layer trigger = avg_entry × (1 - grid_pct × position_layers)
         next_layer_target = average_entry * (1.0 - self.grid_pct * position_layers)
         if current_price <= next_layer_target:
             qty = stake_amount / current_price

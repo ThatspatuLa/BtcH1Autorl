@@ -16,12 +16,31 @@ import random
 from genome.schema import (
     AllocationMethod,
     CandidateGenome,
+    ConfirmationIndicator,
     DcaGenome,
     GridMethod,
     LineageMetadata,
     TpExitMethod,
     TpGenome,
 )
+
+# Available confirmation indicators for random selection
+ALL_CONFIRMATION_INDICATORS = [
+    ConfirmationIndicator.RSI_BELOW,
+    ConfirmationIndicator.RSI_ABOVE,
+    ConfirmationIndicator.MA_ABOVE,
+    ConfirmationIndicator.MA_BELOW,
+    ConfirmationIndicator.VOLATILITY_HIGH,
+    ConfirmationIndicator.VOLATILITY_LOW,
+]
+
+# Default params for each indicator type
+INDICATOR_DEFAULT_PARAMS: dict[str, dict[str, float]] = {
+    "rsi_below": {"threshold": 35.0},
+    "rsi_above": {"threshold": 65.0},
+    "volatility_high": {"threshold": 1.5},
+    "volatility_low": {"threshold": 0.5},
+}
 
 # ============================================================
 # Parameter ranges (the search space)
@@ -80,8 +99,8 @@ def random_dca_genome(
     """Generate a random DcaGenome within the v1 search space.
 
     The genome carries (grid_pct, max_layers, tp_pct) in grid_params under
-    the keys "pct", "max_layers", "tp_pct". When Stage 10 wires the full
-    Stage 8 grid spacing, this is replaced with proper grid_method params.
+    the keys "pct", "max_layers", "tp_pct". Also generates random
+    confirmation_indicators (0-3 indicators from the 6 available types).
 
     tp_pct default: random within DCA_PARAM_RANGES["tp_pct"] if not given.
     """
@@ -91,11 +110,22 @@ def random_dca_genome(
     max_layers = rng.randint(int(max_layers_lo), int(max_layers_hi))
     if tp_pct is None:
         tp_pct = rng.uniform(*DCA_PARAM_RANGES["tp_pct"])
+
+    # Random confirmation indicators: 0-3 indicators, no duplicates
+    n_indicators = rng.randint(0, 3)
+    selected_indicators = rng.sample(ALL_CONFIRMATION_INDICATORS, k=n_indicators)
+    indicator_params = {}
+    for ind in selected_indicators:
+        if ind.value in INDICATOR_DEFAULT_PARAMS:
+            indicator_params[ind.value] = dict(INDICATOR_DEFAULT_PARAMS[ind.value])
+
     return DcaGenome(
         grid_method=GridMethod.FIXED_PCT,
         grid_params={"pct": grid_pct, "max_layers": max_layers, "tp_pct": tp_pct},
         allocation_method=AllocationMethod.EQUAL,
         allocation_params={},
+        confirmation_indicators=selected_indicators,
+        indicator_params=indicator_params,
         max_dca_layers=max_layers,
     )
 
@@ -176,6 +206,25 @@ def mutate(
         new_tp_pct = new_tp_pct + rng.gauss(0, span * 0.20)
         new_tp_pct = max(lo, min(hi, new_tp_pct))
 
+    # Mutate confirmation_indicators (add/remove with small probability)
+    new_indicators = list(parent_dca.confirmation_indicators)
+    new_ind_params = dict(parent_dca.indicator_params)
+    if rng.random() < mutation_rate * 0.5:  # lower rate for structural changes
+        # Either add a random indicator or remove one
+        if new_indicators and rng.random() < 0.5:
+            # Remove one
+            idx = rng.randint(0, len(new_indicators) - 1)
+            removed = new_indicators.pop(idx)
+            new_ind_params.pop(removed.value, None)
+        else:
+            # Add one (not already present)
+            available = [i for i in ALL_CONFIRMATION_INDICATORS if i not in new_indicators]
+            if available and len(new_indicators) < 3:
+                added = rng.choice(available)
+                new_indicators.append(added)
+                if added.value in INDICATOR_DEFAULT_PARAMS:
+                    new_ind_params[added.value] = dict(INDICATOR_DEFAULT_PARAMS[added.value])
+
     # Build child genome
     new_dca = DcaGenome(
         grid_method=parent_dca.grid_method,
@@ -186,6 +235,8 @@ def mutate(
         },
         allocation_method=parent_dca.allocation_method,
         allocation_params=dict(parent_dca.allocation_params),
+        confirmation_indicators=new_indicators,
+        indicator_params=new_ind_params,
         max_dca_layers=int(new_max_layers),
     )
     new_tp = TpGenome(
@@ -240,11 +291,39 @@ def crossover(
     b_tp = float(parent_b.dca_genome.grid_params.get("tp_pct", 0.02))
     new_tp = a_tp if rng.random() < 0.5 else b_tp
 
+    # confirmation_indicators: union of both parents, then randomly sample
+    combined_indicators = list(set(
+        list(parent_a.dca_genome.confirmation_indicators) +
+        list(parent_b.dca_genome.confirmation_indicators)
+    ))
+    # Randomly keep 0-min(3, len) of them
+    n_keep = rng.randint(0, min(3, len(combined_indicators)))
+    if n_keep > 0 and combined_indicators:
+        new_indicators = rng.sample(combined_indicators, k=n_keep)
+    else:
+        new_indicators = []
+    # Merge indicator_params from both parents
+    merged_params = {}
+    for ind in new_indicators:
+        a_params = parent_a.dca_genome.indicator_params.get(ind.value, {})
+        b_params = parent_b.dca_genome.indicator_params.get(ind.value, {})
+        # Pick from one parent or use default
+        if a_params and b_params:
+            merged_params[ind.value] = dict(a_params) if rng.random() < 0.5 else dict(b_params)
+        elif a_params:
+            merged_params[ind.value] = dict(a_params)
+        elif b_params:
+            merged_params[ind.value] = dict(b_params)
+        elif ind.value in INDICATOR_DEFAULT_PARAMS:
+            merged_params[ind.value] = dict(INDICATOR_DEFAULT_PARAMS[ind.value])
+
     new_dca = DcaGenome(
         grid_method=parent_a.dca_genome.grid_method,
         grid_params={"pct": new_pct, "max_layers": new_layers, "tp_pct": new_tp},
         allocation_method=parent_a.dca_genome.allocation_method,
         allocation_params={},
+        confirmation_indicators=new_indicators,
+        indicator_params=merged_params,
         max_dca_layers=new_layers,
     )
     new_tp_genome = TpGenome(

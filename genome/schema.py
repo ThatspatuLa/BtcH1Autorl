@@ -107,6 +107,7 @@ class DcaGenome:
     combo_params: dict[str, float] = field(default_factory=dict)
     trigger_mode: TriggerMode = TriggerMode.PRICE_ONLY
     confirmation_indicators: list[ConfirmationIndicator] = field(default_factory=list)
+    indicator_params: dict[str, dict[str, float]] = field(default_factory=dict)
     max_dca_layers: int = 5
 
     def to_dict(self) -> dict[str, Any]:
@@ -216,6 +217,7 @@ DEFAULT_DCA_GENOME = DcaGenome(
     combo_params={},
     trigger_mode=TriggerMode.PRICE_ONLY,
     confirmation_indicators=[],
+    indicator_params={},
     max_dca_layers=5,
 )
 
@@ -283,6 +285,7 @@ def _dict_to_genome(d: Mapping[str, Any]) -> CandidateGenome:
             combo_params=dict(dca.get("combo_params", {})),
             trigger_mode=TriggerMode(dca.get("trigger_mode", TriggerMode.PRICE_ONLY.value)),
             confirmation_indicators=[ConfirmationIndicator(c) for c in dca.get("confirmation_indicators", [])],
+            indicator_params=dict(dca.get("indicator_params", {})),
             max_dca_layers=int(dca.get("max_dca_layers", 5)),
         ),
         tp_genome=TpGenome(
@@ -366,6 +369,7 @@ def to_freqtrade_strategy_params(genome: CandidateGenome) -> dict[str, Any]:
             "combo_params": genome.dca_genome.combo_params,
             "trigger_mode": genome.dca_genome.trigger_mode.value,
             "confirmation_indicators": [c.value for c in genome.dca_genome.confirmation_indicators],
+            "indicator_params": genome.dca_genome.indicator_params,
             "max_dca_layers": genome.dca_genome.max_dca_layers,
         },
         "tp": {

@@ -111,6 +111,8 @@ def backtest_with_fixed_tp(
     stake_amount: float = 100.0,
     fee_pct: float = 0.001,
     symbol: str = "BTC/USDT",
+    confirmation_indicators: list[str] | None = None,
+    indicator_params: dict[str, dict[str, float]] | None = None,
 ) -> BacktestResult:
     """Run a full backtest using the Stage 9 fixed TP baseline.
 
@@ -119,8 +121,8 @@ def backtest_with_fixed_tp(
     (only FIXED supported here), and returns a BacktestResult that
     flows into Stage 5 reward + Stage 6 monthly fitness.
 
-    Stage 10 evolves (grid_pct, max_layers). Stage 14 will swap this
-    for a fuller genome-driven path.
+    Stage 10 evolves (grid_pct, max_layers, confirmation_indicators).
+    Stage 14 will swap this for a fuller genome-driven path.
 
     Args:
         df: OHLCV dataframe (Stage 2 format: date, open, high, low, close, volume)
@@ -134,6 +136,8 @@ def backtest_with_fixed_tp(
         stake_amount: USDT per layer (default 100)
         fee_pct: round-trip fee (default 0.1%)
         symbol: trading pair (default BTC/USDT)
+        confirmation_indicators: list of indicator names to gate on
+        indicator_params: dict of {indicator_name: {param: value}}
 
     Returns:
         BacktestResult with equity_curve + trades_df for Stage 5+6 to score.
@@ -153,6 +157,8 @@ def backtest_with_fixed_tp(
         stake_amount=stake_amount,
         fee_pct=fee_pct,
         symbol=symbol,
+        confirmation_indicators=confirmation_indicators,
+        indicator_params=indicator_params,
         **tp_kwargs,
     )
 
@@ -160,10 +166,12 @@ def backtest_with_fixed_tp(
 def extract_dca_params_from_genome(genome: CandidateGenome | DcaGenome) -> dict[str, Any]:
     """Extract the Stage-9-relevant params from a CandidateGenome or DcaGenome.
 
-    Reads from dca_genome.grid_params:
-    - "pct" → grid_pct
-    - "max_layers" → max_layers (also dca_genome.max_dca_layers for back-compat)
-    - "tp_pct" → tp_pct (carried in the genome, read by Stage 9 baseline)
+    Reads from dca_genome:
+    - grid_params["pct"] → grid_pct
+    - grid_params["max_layers"] → max_layers
+    - grid_params["tp_pct"] → tp_pct
+    - confirmation_indicators → list of indicator names
+    - indicator_params → dict of {indicator_name: {param: value}}
 
     Stage 9 only supports fixed_pct. Other grid_methods fall back to a
     default of 0.015 because the OrderManager can't compute indicators.
@@ -177,4 +185,29 @@ def extract_dca_params_from_genome(genome: CandidateGenome | DcaGenome) -> dict[
         dca.grid_params.get("max_layers", dca.max_dca_layers)
     )
     tp_pct = float(dca.grid_params.get("tp_pct", 0.02))
-    return {"grid_pct": grid_pct, "max_layers": max_layers, "tp_pct": tp_pct}
+    confirmation_indicators = [c.value for c in dca.confirmation_indicators]
+    # Build indicator_params from genome if present, else use defaults
+    indicator_params = dca.indicator_params if hasattr(dca, 'indicator_params') and dca.indicator_params else _default_indicator_params(confirmation_indicators)
+    return {
+        "grid_pct": grid_pct,
+        "max_layers": max_layers,
+        "tp_pct": tp_pct,
+        "confirmation_indicators": confirmation_indicators,
+        "indicator_params": indicator_params,
+    }
+
+
+def _default_indicator_params(indicators: list[str]) -> dict[str, dict[str, float]]:
+    """Return sensible default params for each indicator type."""
+    defaults: dict[str, dict[str, float]] = {}
+    for ind in indicators:
+        if ind == "rsi_below":
+            defaults[ind] = {"threshold": 35.0}
+        elif ind == "rsi_above":
+            defaults[ind] = {"threshold": 65.0}
+        elif ind == "volatility_high":
+            defaults[ind] = {"threshold": 1.5}
+        elif ind == "volatility_low":
+            defaults[ind] = {"threshold": 0.5}
+        # ma_above / ma_below need no extra params
+    return defaults

@@ -1,9 +1,10 @@
 """State machine — orchestrates backtest loop candle-by-candle.
 
 Stage 3 placeholder flow:
-1. For each candle: order_manager.decide() → execute decision
-2. Track open positions, equity, exposure
-3. When cycle closes, record trade, update equity
+1. Pre-compute indicators on full dataframe
+2. For each candle: order_manager.decide() → execute decision
+3. Track open positions, equity, exposure
+4. When cycle closes, record trade, update equity
 
 Stage 10 (DCA evolution) calls run_state_machine() in the inner loop of evolution.
 """
@@ -11,11 +12,13 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from typing import Optional
 
 import pandas as pd
 
 from dca_engine.cycle_lifecycle import CycleLifecycle
 from dca_engine.exposure_tracker import ExposureTracker
+from dca_engine.indicators import IndicatorFrame, compute_indicators
 from dca_engine.order_manager import OrderAction, OrderManager
 from dca_engine.position_tracker import PositionTracker
 
@@ -48,6 +51,7 @@ def run_state_machine(
     initial_deposit: float = 10000.0,
     stake_amount: float = 100.0,
     fee_pct: float = 0.001,  # 0.1% round-trip
+    indicators: Optional[IndicatorFrame] = None,
 ) -> StateMachineResult:
     """Iterate over the candles, running the state machine.
 
@@ -57,12 +61,17 @@ def run_state_machine(
         initial_deposit: starting account equity
         stake_amount: USDT per layer / per cycle
         fee_pct: round-trip fee as fraction of notional
+        indicators: pre-computed indicator frame (computed if None and confirmations active)
 
     Returns:
         StateMachineResult with equity_curve, trades, exposure snapshots
     """
     if df.empty:
         raise ValueError("Empty dataframe")
+
+    # Auto-compute indicators if the OrderManager has confirmations but none provided
+    if indicators is None and order_manager.confirmation_indicators:
+        indicators = compute_indicators(df)
 
     position_tracker = PositionTracker()
     exposure = ExposureTracker(initial_deposit=initial_deposit)
@@ -79,6 +88,9 @@ def run_state_machine(
     for _idx, row in df.iterrows():
         current_price = float(row["close"])
         current_time = pd.Timestamp(row["date"]).isoformat()
+
+        # Get indicator snapshot for this candle
+        ind_snapshot = indicators.snapshot_at(_idx) if indicators else None
 
         # Snapshot exposure at start of candle
         snap = exposure.snapshot(position_tracker, current_price)
@@ -99,6 +111,7 @@ def run_state_machine(
                 average_entry=pos.average_entry,
                 has_open_position=True,
                 stake_amount=stake_amount,
+                indicators=ind_snapshot,
             )
             if decision.action == OrderAction.CLOSE_CYCLE:
                 # Close at current_price
@@ -129,6 +142,7 @@ def run_state_machine(
                 average_entry=0.0,
                 has_open_position=False,
                 stake_amount=stake_amount,
+                indicators=ind_snapshot,
             )
         else:
             # Use first active cycle
@@ -143,6 +157,7 @@ def run_state_machine(
                     average_entry=pos.average_entry,
                     has_open_position=True,
                     stake_amount=stake_amount,
+                    indicators=ind_snapshot,
                 )
 
         if decision is None or decision.action == OrderAction.NONE:

@@ -134,6 +134,7 @@ class CandidateEvaluator:
         # The tp_pct is read from tp_genome.exit_params["tp_pct"] by the
         # Stage 9 baseline. Our operators (random/mutate/crossover) keep
         # the dca_genome and tp_genome in sync.
+        # Confirmation indicators are passed through from the genome.
         bt = backtest_with_fixed_tp(
             df=self.df,
             candidate_id=candidate_id,
@@ -142,6 +143,8 @@ class CandidateEvaluator:
             tp_genome=genome.tp_genome,
             grid_pct=dca_params["grid_pct"],
             max_layers=dca_params["max_layers"],
+            confirmation_indicators=dca_params.get("confirmation_indicators", []),
+            indicator_params=dca_params.get("indicator_params", {}),
         )
 
         # Stage 6 + 6.5: monthly fitness + deployment gates

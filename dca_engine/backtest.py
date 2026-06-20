@@ -13,6 +13,7 @@ from typing import Any
 
 import pandas as pd
 
+from dca_engine.indicators import compute_indicators
 from dca_engine.order_manager import OrderManager
 from dca_engine.state_machine import StateMachineResult, run_state_machine
 
@@ -69,23 +70,44 @@ def backtest_candidate(
     stake_amount: float = 100.0,
     fee_pct: float = 0.001,
     symbol: str = "BTC/USDT",
+    confirmation_indicators: list[str] | None = None,
+    indicator_params: dict[str, dict[str, float]] | None = None,
+    rsi_period: int = 14,
+    ma_period: int = 200,
+    vol_period: int = 20,
+    ref_vol_period: int = 100,
 ) -> BacktestResult:
     """Run one candidate backtest through the OHLCV dataframe.
 
-    Stage 3 placeholder: simple grid_pct + fixed TP. Stage 8 will use full genome.
+    Stage 3 placeholder: simple grid_pct + fixed TP. Stage 8 wires confirmations.
     """
     order_manager = OrderManager(
         grid_pct=grid_pct,
         tp_pct=tp_pct,
         max_layers=max_layers,
         symbol=symbol,
+        confirmation_indicators=confirmation_indicators,
+        indicator_params=indicator_params,
     )
+
+    # Pre-compute indicators if confirmations are active
+    indicators = None
+    if confirmation_indicators:
+        indicators = compute_indicators(
+            df,
+            rsi_period=rsi_period,
+            ma_period=ma_period,
+            vol_period=vol_period,
+            ref_vol_period=ref_vol_period,
+        )
+
     sm_result: StateMachineResult = run_state_machine(
         df=df,
         order_manager=order_manager,
         initial_deposit=initial_deposit,
         stake_amount=stake_amount,
         fee_pct=fee_pct,
+        indicators=indicators,
     )
 
     trades_df = pd.DataFrame(sm_result.trades) if sm_result.trades else pd.DataFrame(
