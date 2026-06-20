@@ -38,3 +38,7 @@ ignore = [
 "reports/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
 "dca_engine/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
 "data/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
+"fitness/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
+"safety/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
+"dca_calc/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
+"tp_calc/*" = ["B", "N", "RUF001", "RUF002", "RUF003"]
