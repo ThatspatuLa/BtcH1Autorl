@@ -1,4 +1,4 @@
-"""Month-by-month walk-forward fitness engine (Stage 6).
+"""Stage 6 — Month-by-Month Fitness Engine (walk-forward aggregation).
 
 Pipeline:
 1. Take a BacktestResult (or any equity_curve + trades_df pair).
@@ -21,9 +21,11 @@ Aggregation rules (locked for v1):
   - worst_floor: 1.0 if worst_month > 0, else 0.5 if worst_month in [-0.2, 0], else 0.0
     (a single catastrophic month kills the strategy)
 
-This is the function Stage 10 (DCA Evolution) will call instead of Stage 5's
-compute_score() directly. It returns a MonthlyFitnessResult with the per-month
-breakdown so the reporting layer can show month-by-month equity heatmaps.
+Stage 6.5 — Discovery vs Deployment:
+- consistency < 0.50 is no longer a HARD reject (it is in discovery phase)
+- It applies the consistency_multiplier from fitness.deployment_gates
+- worst_month and median rejections REMAIN hard rejects (real safety)
+- deployment gates are evaluated separately (see MonthlyFitnessResult)
 """
 from __future__ import annotations
 
@@ -33,6 +35,11 @@ from typing import Any
 
 import pandas as pd
 
+from fitness.deployment_gates import (
+    DEPLOYMENT_MIN_CONSISTENCY,
+    compute_deployment_gates,
+    consistency_multiplier,
+)
 from reward.scoring import RejectedResult, ScoreResult, compute_score
 
 __all__ = [
@@ -53,22 +60,23 @@ __all__ = [
 # Walk-forward scoring weights v1 — locked, do not evolve
 WALK_FORWARD_V1 = {
     "median_weight": 0.50,       # median monthly score
-    "consistency_weight": 0.20,  # % months profitable
+    "consistency_weight": 0.20,  # % months profitable (used inside base aggregate)
     "variance_weight": 0.15,     # 1 - clipped stddev
     "worst_floor_weight": 0.15,  # floor of monthly scores
-    # Hard rule: reject if consistency < this
-    "min_consistency": 0.50,     # 50%+ of months must be profitable
-    # Hard rule: reject if worst month score below this
+    # Discovery-phase hard rules (still reject — these are real safety)
     "min_worst_month_score": -0.5,
-    # Hard rule: reject if median below this
     "min_median_score": 0.10,
+    # NOTE: consistency floor is now a soft penalty, NOT a hard reject.
+    # See fitness.deployment_gates.consistency_multiplier().
+    # The DEPLOYMENT_MIN_CONSISTENCY constant is used at deployment time only.
 }
 
 # Below this per-month score, count the month as "below floor" (for reporting)
 FLOOR_MONTH_SCORE = 0.20
 
-# Consistency floor for "robust" strategies (rejection threshold)
-CONSISTENCY_FLOOR = WALK_FORWARD_V1["min_consistency"]
+# Kept as a re-export for downstream code that still imports it.
+# (No longer used as a rejection threshold.)
+CONSISTENCY_FLOOR = DEPLOYMENT_MIN_CONSISTENCY
 
 
 # ============================================================
@@ -98,7 +106,11 @@ class MonthlyScore:
 
 @dataclass
 class MonthlyFitnessResult:
-    """Final Stage 6 fitness output — replaces single compute_score for evolution."""
+    """Final Stage 6 fitness output — replaces single compute_score for evolution.
+
+    Carries the walk-forward aggregate (base_aggregate_fitness) plus the
+    two-stage discovery / deployment picture for downstream reports.
+    """
     candidate_id: str
     experiment_slug: str
     monthly_scores: list[MonthlyScore]
@@ -111,7 +123,20 @@ class MonthlyFitnessResult:
     stddev_monthly_score: float
     variance_penalty: float
     worst_floor_multiplier: float
+    # The pre-penalty walk-forward aggregate. Range 0..1. Used as the
+    # base for the consistency_multiplier in discovery_fitness.
+    base_aggregate_fitness: float
+    # Discovery fitness = base_aggregate × consistency_multiplier (used by GA breeding)
+    discovery_fitness: float
+    consistency_multiplier: float
+    # Deployment fitness = discovery_fitness if deployment_pass, else 0
+    deployment_fitness: float
+    deployment_pass: bool
+    failed_deployment_gates: list[str]
+    closest_to_passing_score: float
+    # Aggregate fitness (alias of discovery_fitness) — kept for back-compat
     final_fitness: float
+    # Whether this candidate is hard-rejected (worst_month, median, all_months_rejected, no_data)
     rejected: bool
     reject_reason: str | None
     # Snapshot of the underlying Stage 5 result for traceability
@@ -132,6 +157,13 @@ class MonthlyFitnessResult:
             "stddev_monthly_score": self.stddev_monthly_score,
             "variance_penalty": self.variance_penalty,
             "worst_floor_multiplier": self.worst_floor_multiplier,
+            "base_aggregate_fitness": self.base_aggregate_fitness,
+            "discovery_fitness": self.discovery_fitness,
+            "consistency_multiplier": self.consistency_multiplier,
+            "deployment_fitness": self.deployment_fitness,
+            "deployment_pass": self.deployment_pass,
+            "failed_deployment_gates": self.failed_deployment_gates,
+            "closest_to_passing_score": self.closest_to_passing_score,
             "final_fitness": self.final_fitness,
             "rejected": self.rejected,
             "reject_reason": self.reject_reason,
@@ -349,7 +381,17 @@ def aggregate_monthly_fitness(
 ) -> MonthlyFitnessResult:
     """Aggregate per-month scores into a single fitness.
 
-    Implements the locked v1 walk-forward aggregation rules.
+    Implements the locked v1 walk-forward aggregation rules plus Stage 6.5's
+    discovery vs deployment split.
+
+    Hard rejects (rejected=True, fitness=0):
+    - no_monthly_data
+    - all_months_rejected
+    - worst_month below min_worst_month_score (genuine catastrophic)
+    - median below min_median_score (genuine floor)
+
+    Soft penalty (NOT a hard reject):
+    - consistency below 0.50 — applies consistency_multiplier to discovery_fitness
     """
     n_months = len(monthly_scores)
     if n_months == 0:
@@ -366,6 +408,13 @@ def aggregate_monthly_fitness(
             stddev_monthly_score=0.0,
             variance_penalty=0.0,
             worst_floor_multiplier=0.0,
+            base_aggregate_fitness=0.0,
+            discovery_fitness=0.0,
+            consistency_multiplier=0.0,
+            deployment_fitness=0.0,
+            deployment_pass=False,
+            failed_deployment_gates=["no_monthly_data"],
+            closest_to_passing_score=0.0,
             final_fitness=0.0,
             rejected=True,
             reject_reason="no_monthly_data",
@@ -381,7 +430,7 @@ def aggregate_monthly_fitness(
     # Use only non-rejected months for central stats
     valid_scores = [m.monthly_score for m in monthly_scores if not m.rejected]
     if not valid_scores:
-        # All months rejected → fail
+        # All months rejected → hard fail (no data to compute any fitness on)
         return MonthlyFitnessResult(
             candidate_id=candidate_id,
             experiment_slug=experiment_slug,
@@ -395,6 +444,13 @@ def aggregate_monthly_fitness(
             stddev_monthly_score=0.0,
             variance_penalty=0.0,
             worst_floor_multiplier=0.0,
+            base_aggregate_fitness=0.0,
+            discovery_fitness=0.0,
+            consistency_multiplier=0.0,
+            deployment_fitness=0.0,
+            deployment_pass=False,
+            failed_deployment_gates=["all_months_rejected"],
+            closest_to_passing_score=0.0,
             final_fitness=0.0,
             rejected=True,
             reject_reason="all_months_rejected",
@@ -408,28 +464,90 @@ def aggregate_monthly_fitness(
     floor_mult = _worst_floor_multiplier(worst_score)
     stddev_score = float(statistics.pstdev(valid_scores))
 
-    # Weighted aggregation
+    # Weighted aggregation (the pre-penalty base)
     weights = WALK_FORWARD_V1
-    final_fitness = (
+    base_aggregate_fitness = (
         weights["median_weight"] * median_score
         + weights["consistency_weight"] * consistency_ratio
         + weights["variance_weight"] * var_pen
         + weights["worst_floor_weight"] * floor_mult
     )
 
-    # Hard rejection rules
+    # Stage 6.5: consistency is a soft penalty, not a hard reject
+    mult = consistency_multiplier(consistency_ratio)
+    discovery_fitness = base_aggregate_fitness * mult
+
+    # Hard rejection rules (consistency removed)
     rejected = False
     reject_reason: str | None = None
-    if consistency_ratio < weights["min_consistency"]:
-        rejected = True
-        reject_reason = f"consistency<{weights['min_consistency']:.2f}"
-    elif worst_score < weights["min_worst_month_score"]:
+    if worst_score < weights["min_worst_month_score"]:
         rejected = True
         reject_reason = f"worst_month<{weights['min_worst_month_score']:.2f}"
     elif median_score < weights["min_median_score"]:
         rejected = True
         reject_reason = f"median<{weights['min_median_score']:.2f}"
 
+    if rejected:
+        # Hard-rejected: zero everything out (not eligible for breeding)
+        discovery_fitness = 0.0
+        deployment_fitness = 0.0
+        deployment_pass = False
+        failed_gates: list[str] = [reject_reason] if reject_reason else []
+        closest = 0.0
+    else:
+        # Compute deployment picture (uses full_period_score for DD/TPM if available)
+        # Worst_month over months is a proxy for max DD — use it as DD signal
+        # (conservative: monthly worst is always <= period worst, but here we
+        # don't have the period max DD on this struct; pass -1 so the gate
+        # only fires on consistency / volume)
+        max_dd_proxy = -1.0
+        total_trades = sum(m.total_trades for m in monthly_scores)
+        months_active = float(n_months)
+        tpm_proxy = (total_trades / months_active) if months_active > 0 else 0.0
+        gate = compute_deployment_gates(
+            consistency_ratio=consistency_ratio,
+            max_drawdown_pct=max_dd_proxy,
+            trades_per_month=tpm_proxy,
+            total_trades=total_trades,
+            has_invalid_equity=False,
+            has_margin_failure=False,
+            has_dca_completion_failure=False,
+            base_aggregate_fitness=base_aggregate_fitness,
+        )
+        deployment_fitness = gate.deployment_fitness
+        deployment_pass = gate.deployment_pass
+        failed_gates = gate.failed_deployment_gates
+        closest = gate.closest_to_passing_score
+        # final_fitness is discovery (kept as back-compat alias)
+        final_fitness = discovery_fitness
+        return MonthlyFitnessResult(
+            candidate_id=candidate_id,
+            experiment_slug=experiment_slug,
+            monthly_scores=monthly_scores,
+            n_months=n_months,
+            n_profitable_months=n_profitable,
+            n_rejected_months=n_rejected,
+            consistency_ratio=consistency_ratio,
+            median_monthly_score=median_score,
+            worst_month_score=worst_score,
+            stddev_monthly_score=stddev_score,
+            variance_penalty=var_pen,
+            worst_floor_multiplier=floor_mult,
+            base_aggregate_fitness=base_aggregate_fitness,
+            discovery_fitness=discovery_fitness,
+            consistency_multiplier=mult,
+            deployment_fitness=deployment_fitness,
+            deployment_pass=deployment_pass,
+            failed_deployment_gates=failed_gates,
+            closest_to_passing_score=closest,
+            final_fitness=final_fitness,
+            rejected=False,
+            reject_reason=None,
+            full_period_score=full_period_score,
+            full_period_rejected=full_period_rejected,
+        )
+
+    # Hard-rejected path
     return MonthlyFitnessResult(
         candidate_id=candidate_id,
         experiment_slug=experiment_slug,
@@ -443,7 +561,14 @@ def aggregate_monthly_fitness(
         stddev_monthly_score=stddev_score,
         variance_penalty=var_pen,
         worst_floor_multiplier=floor_mult,
-        final_fitness=final_fitness if not rejected else 0.0,
+        base_aggregate_fitness=base_aggregate_fitness,
+        discovery_fitness=0.0,
+        consistency_multiplier=mult,
+        deployment_fitness=0.0,
+        deployment_pass=False,
+        failed_deployment_gates=failed_gates,
+        closest_to_passing_score=closest,
+        final_fitness=0.0,
         rejected=rejected,
         reject_reason=reject_reason,
         full_period_score=full_period_score,

@@ -244,10 +244,23 @@ class EvolutionHarness:
             if self.hooks.on_candidate_evaluated:
                 self.hooks.on_candidate_evaluated(res)
 
-        # 3) Sort by fitness, take elites
+        # 3) Sort + select. With the discovery/deployment split:
+        #    - "passed" = not hard-rejected (eligible for breeding, with non-zero
+        #      discovery_fitness; may still be sub-deployment).
+        #    - Breeding sort: by discovery_fitness descending.
+        #    - Deployment sort: by deployment_fitness descending (only those
+        #      with deployment_pass=True).
         passed = [r for r in results if not r.rejected]
-        passed.sort(key=lambda r: r.fitness, reverse=True)
+        passed.sort(key=lambda r: r.discovery_fitness, reverse=True)
         elites = passed[:self.config.elite_count]
+
+        # Top-N by discovery (the "almost passing" diagnostic)
+        top_discovery = passed[:self.config.leaderboard_top_n]
+
+        # Top-N by deployment (only deployment-passing candidates)
+        deployment_passing = [r for r in results if r.deployment_pass]
+        deployment_passing.sort(key=lambda r: r.deployment_fitness, reverse=True)
+        top_deployment = deployment_passing[:self.config.leaderboard_top_n]
 
         # 4) Build GenerationRecord
         reason_counts = Counter(r.reject_reason for r in results if r.rejected)
@@ -255,21 +268,39 @@ class EvolutionHarness:
             str(k): int(v) for k, v in reason_counts.items() if k is not None
         }
         best = elites[0] if elites else None
-        fitnesses = [r.fitness for r in passed]
+        discovery_fitnesses = [r.discovery_fitness for r in passed]
         median_fitness = (
-            sorted(fitnesses)[len(fitnesses) // 2] if fitnesses else 0.0
+            sorted(discovery_fitnesses)[len(discovery_fitnesses) // 2]
+            if discovery_fitnesses else 0.0
         )
         leaderboard = [
             {
                 "rank": i + 1,
                 "candidate_id": r.candidate_id,
                 "genome_id": r.genome_id,
-                "fitness": r.fitness,
+                "discovery_fitness": r.discovery_fitness,
+                "deployment_fitness": r.deployment_fitness,
+                "deployment_pass": r.deployment_pass,
+                "failed_deployment_gates": r.failed_deployment_gates,
+                "closest_to_passing_score": r.closest_to_passing_score,
+                "consistency_ratio": r.consistency_ratio,
+                "consistency_multiplier": r.consistency_multiplier,
                 "n_cycles_closed": r.n_cycles_closed,
                 "final_equity": r.final_equity,
                 "max_dd_pct": r.max_dd_pct,
             }
-            for i, r in enumerate(elites[:self.config.leaderboard_top_n])
+            for i, r in enumerate(top_discovery)
+        ]
+        deployment_leaderboard = [
+            {
+                "rank": i + 1,
+                "candidate_id": r.candidate_id,
+                "genome_id": r.genome_id,
+                "deployment_fitness": r.deployment_fitness,
+                "discovery_fitness": r.discovery_fitness,
+                "consistency_ratio": r.consistency_ratio,
+            }
+            for i, r in enumerate(top_deployment)
         ]
         record = GenerationRecord(
             generation_index=gen_idx,
@@ -278,7 +309,8 @@ class EvolutionHarness:
             n_candidates=len(results),
             n_rejected=len(results) - len(passed),
             n_passed=len(passed),
-            best_fitness=best.fitness if best else 0.0,
+            n_deployment_passing=len(deployment_passing),
+            best_fitness=best.discovery_fitness if best else 0.0,
             median_fitness=median_fitness,
             best_candidate_id=best.candidate_id if best else "",
             best_genome_id=best.genome_id if best else "",
@@ -286,20 +318,19 @@ class EvolutionHarness:
             rejection_reasons=all_reasons,
             evaluated_candidate_ids=[r.candidate_id for r in results],
             leaderboard=leaderboard,
+            deployment_leaderboard=deployment_leaderboard,
         )
 
-        # 5) Persist per-generation artifacts (always create dirs even if empty)
+        # 5) Persist per-generation artifacts
         save_leaderboard(gen_idx, leaderboard, self.config.output_dir)
         save_rejection_report(gen_idx, all_reasons, self.config.output_dir)
         if best:
-            # Find the genome for the best candidate
             best_genome = next(
                 (c for c in candidates if c.genome_id == best.genome_id), None
             )
             if best_genome is not None:
                 save_best_genome(gen_idx, best_genome.to_dict(), self.config.output_dir)
         else:
-            # Touch best_genomes/ dir even if no elites this gen
             (Path(self.config.output_dir) / "best_genomes").mkdir(parents=True, exist_ok=True)
 
         return record

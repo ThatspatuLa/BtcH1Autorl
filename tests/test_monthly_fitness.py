@@ -223,18 +223,43 @@ def test_aggregate_inconsistent_profitable_strategy():
     assert result.final_fitness == pytest.approx(0.525)
 
 
-def test_aggregate_rejected_for_low_consistency():
-    """7 months: 3 profitable, 4 unprofitable. consistency 3/7 = 0.43 < 0.50 → reject."""
+def test_aggregate_low_consistency_is_soft_penalty():
+    """7 months: 3 profitable (score 0.3), 4 unprofitable (score 0.2).
+    consistency 3/7 = 0.43.
+
+    The median is 0.2 (≥ 0.10), the worst is 0.2 (≥ -0.5), so the only
+    soft-failure condition is consistency.
+
+    With the discovery/deployment split (Stage 6.5), consistency < 0.50
+    is a SOFT penalty, not a hard reject. The candidate should:
+    - NOT be hard-rejected
+    - have a non-zero discovery_fitness
+    - have consistency_multiplier=0.85 (the 0.40-0.50 band)
+    - NOT pass deployment (consistency gate fails)
+    - have a non-zero closest_to_passing_score
+    """
     scores = []
     for i, (net, score) in enumerate([
-        (0.05, 0.4), (0.05, 0.4), (0.05, 0.4),  # profitable
-        (-0.05, 0.0), (-0.05, 0.0), (-0.05, 0.0), (-0.05, 0.0),  # unprofitable
+        (0.05, 0.3), (0.05, 0.3), (0.05, 0.3),  # profitable
+        (-0.05, 0.2), (-0.05, 0.2), (-0.05, 0.2), (-0.05, 0.2),  # unprofitable but not catastrophic
     ]):
         scores.append(_make_monthly_score(i, f"2021-{i+6:02d}", net, score))
     result = aggregate_monthly_fitness(scores, "cand_inconsistent", "test")
-    assert result.rejected is True
-    assert "consistency" in result.reject_reason
-    assert result.final_fitness == 0.0
+    # Soft penalty: NOT hard-rejected
+    assert result.rejected is False
+    # Discovery fitness is non-zero
+    assert result.discovery_fitness > 0.0
+    # Consistency multiplier is 0.85 (the 0.40-0.50 band)
+    assert result.consistency_multiplier == pytest.approx(0.85)
+    # Deployment FAILS because consistency < 0.50
+    assert result.deployment_pass is False
+    assert "consistency" in result.failed_deployment_gates[0]
+    # Deployment fitness is 0 (gate blocked it)
+    assert result.deployment_fitness == 0.0
+    # closest_to_passing_score is non-zero (this is a near-miss)
+    assert result.closest_to_passing_score > 0.0
+    # final_fitness is the discovery_fitness (back-compat alias)
+    assert result.final_fitness == pytest.approx(result.discovery_fitness)
 
 
 def test_aggregate_rejected_for_catastrophic_month():

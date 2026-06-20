@@ -277,6 +277,7 @@ def test_save_load_state_roundtrip(temp_output_dir):
         n_candidates=100,
         n_rejected=80,
         n_passed=20,
+        n_deployment_passing=2,
         best_fitness=0.5,
         median_fitness=0.3,
         best_candidate_id="cand_001",

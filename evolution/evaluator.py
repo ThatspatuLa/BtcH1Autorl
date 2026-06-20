@@ -25,25 +25,49 @@ class EvaluationResult:
     """Result of evaluating one candidate. The shape the harness consumes."""
     candidate_id: str
     genome_id: str
-    fitness: float              # monthly_fitness.final_fitness (0..1)
+    # Discovery fitness = base_aggregate × consistency_multiplier. Used for
+    # breeding selection by the GA. Range 0..1. NOT deployment-approved.
+    discovery_fitness: float
+    # Deployment fitness: == discovery_fitness if every deployment gate passes,
+    # else 0. Used for reporting and final acceptance.
+    deployment_fitness: float
+    deployment_pass: bool
+    failed_deployment_gates: list[str]
+    closest_to_passing_score: float
+    consistency_ratio: float
+    consistency_multiplier: float
+    # Whether this candidate is hard-rejected (safety). Soft-failing candidates
+    # (consistency<0.50, low discovery_fitness) have rejected=False and a
+    # non-zero discovery_fitness.
     rejected: bool
     reject_reason: str | None
     elapsed_seconds: float
     monthly_fitness: MonthlyFitnessResult
-    score_breakdown: dict[str, Any] | None  # Stage 5 component breakdown, if not rejected
+    score_breakdown: dict[str, Any] | None
     raw_metrics: dict[str, Any]
     n_cycles_closed: int
     final_equity: float
     max_dd_pct: float
-    # Source: which stage produced the rejection ("monthly_fitness" or "score")
     rejection_source: str | None = None
     error: str | None = None
+
+    @property
+    def fitness(self) -> float:
+        """Back-compat alias — what the GA used to sort by. Now == discovery_fitness."""
+        return self.discovery_fitness
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "candidate_id": self.candidate_id,
             "genome_id": self.genome_id,
-            "fitness": self.fitness,
+            "discovery_fitness": self.discovery_fitness,
+            "deployment_fitness": self.deployment_fitness,
+            "deployment_pass": self.deployment_pass,
+            "failed_deployment_gates": self.failed_deployment_gates,
+            "closest_to_passing_score": self.closest_to_passing_score,
+            "consistency_ratio": self.consistency_ratio,
+            "consistency_multiplier": self.consistency_multiplier,
+            "fitness": self.fitness,  # back-compat
             "rejected": self.rejected,
             "reject_reason": self.reject_reason,
             "rejection_source": self.rejection_source,
@@ -77,7 +101,13 @@ class CandidateEvaluator:
             return EvaluationResult(
                 candidate_id=candidate_id,
                 genome_id=genome.genome_id,
-                fitness=0.0,
+                discovery_fitness=0.0,
+                deployment_fitness=0.0,
+                deployment_pass=False,
+                failed_deployment_gates=["evaluation_error"],
+                closest_to_passing_score=0.0,
+                consistency_ratio=0.0,
+                consistency_multiplier=0.0,
                 rejected=True,
                 reject_reason="evaluation_error",
                 rejection_source="evaluator",
@@ -111,7 +141,7 @@ class CandidateEvaluator:
             max_layers=dca_params["max_layers"],
         )
 
-        # Stage 6: monthly fitness (also runs Stage 5 internally)
+        # Stage 6 + 6.5: monthly fitness + deployment gates
         fitness = compute_monthly_fitness(
             equity_curve=bt.equity_curve,
             trades_df=bt.trades_df,
@@ -119,12 +149,18 @@ class CandidateEvaluator:
             experiment_slug=self.experiment_slug,
         )
 
-        # If monthly fitness rejected, that's the final word
+        # If monthly fitness hard-rejected, that's the final word
         if fitness.rejected:
             return EvaluationResult(
                 candidate_id=candidate_id,
                 genome_id=genome.genome_id,
-                fitness=0.0,
+                discovery_fitness=fitness.discovery_fitness,
+                deployment_fitness=fitness.deployment_fitness,
+                deployment_pass=fitness.deployment_pass,
+                failed_deployment_gates=fitness.failed_deployment_gates,
+                closest_to_passing_score=fitness.closest_to_passing_score,
+                consistency_ratio=fitness.consistency_ratio,
+                consistency_multiplier=fitness.consistency_multiplier,
                 rejected=True,
                 reject_reason=fitness.reject_reason or "unknown",
                 rejection_source="monthly_fitness",
@@ -149,7 +185,13 @@ class CandidateEvaluator:
             return EvaluationResult(
                 candidate_id=candidate_id,
                 genome_id=genome.genome_id,
-                fitness=0.0,
+                discovery_fitness=fitness.discovery_fitness,
+                deployment_fitness=fitness.deployment_fitness,
+                deployment_pass=fitness.deployment_pass,
+                failed_deployment_gates=fitness.failed_deployment_gates,
+                closest_to_passing_score=fitness.closest_to_passing_score,
+                consistency_ratio=fitness.consistency_ratio,
+                consistency_multiplier=fitness.consistency_multiplier,
                 rejected=True,
                 reject_reason=score_result.reason,
                 rejection_source="score",
@@ -165,7 +207,13 @@ class CandidateEvaluator:
         return EvaluationResult(
             candidate_id=candidate_id,
             genome_id=genome.genome_id,
-            fitness=fitness.final_fitness,
+            discovery_fitness=fitness.discovery_fitness,
+            deployment_fitness=fitness.deployment_fitness,
+            deployment_pass=fitness.deployment_pass,
+            failed_deployment_gates=fitness.failed_deployment_gates,
+            closest_to_passing_score=fitness.closest_to_passing_score,
+            consistency_ratio=fitness.consistency_ratio,
+            consistency_multiplier=fitness.consistency_multiplier,
             rejected=False,
             reject_reason=None,
             rejection_source=None,
@@ -205,6 +253,13 @@ def _empty_monthly_fitness(candidate_id: str, slug: str) -> MonthlyFitnessResult
         stddev_monthly_score=0.0,
         variance_penalty=0.0,
         worst_floor_multiplier=0.0,
+        base_aggregate_fitness=0.0,
+        discovery_fitness=0.0,
+        consistency_multiplier=0.0,
+        deployment_fitness=0.0,
+        deployment_pass=False,
+        failed_deployment_gates=["evaluation_error"],
+        closest_to_passing_score=0.0,
         final_fitness=0.0,
         rejected=True,
         reject_reason="no_data",

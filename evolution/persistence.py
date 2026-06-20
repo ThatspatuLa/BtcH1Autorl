@@ -25,8 +25,9 @@ class GenerationRecord:
     ended_at: float | None
     n_candidates: int
     n_rejected: int
-    n_passed: int
-    best_fitness: float
+    n_passed: int                          # not hard-rejected (eligible for breeding)
+    n_deployment_passing: int              # subset of passed that also cleared deployment gates
+    best_fitness: float                    # best discovery_fitness this gen
     median_fitness: float
     best_candidate_id: str
     best_genome_id: str
@@ -34,15 +35,35 @@ class GenerationRecord:
     rejection_reasons: dict[str, int]       # reason → count
     # IDs of all evaluated candidates (so resume can skip them)
     evaluated_candidate_ids: list[str] = field(default_factory=list)
-    # Top-N leaderboard for this generation
+    # Top-N leaderboard by discovery_fitness (the "almost passing" diagnostic)
     leaderboard: list[dict[str, Any]] = field(default_factory=list)
+    # Top-N by deployment_fitness (only deployment_pass=True candidates)
+    deployment_leaderboard: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> GenerationRecord:
-        return cls(**d)
+        # Forward-compat: missing new fields default to zero / empty
+        return cls(
+            generation_index=d["generation_index"],
+            started_at=d["started_at"],
+            ended_at=d.get("ended_at"),
+            n_candidates=d["n_candidates"],
+            n_rejected=d["n_rejected"],
+            n_passed=d["n_passed"],
+            n_deployment_passing=d.get("n_deployment_passing", 0),
+            best_fitness=d["best_fitness"],
+            median_fitness=d["median_fitness"],
+            best_candidate_id=d["best_candidate_id"],
+            best_genome_id=d["best_genome_id"],
+            wall_time_seconds_used=d["wall_time_seconds_used"],
+            rejection_reasons=d["rejection_reasons"],
+            evaluated_candidate_ids=d.get("evaluated_candidate_ids", []),
+            leaderboard=d.get("leaderboard", []),
+            deployment_leaderboard=d.get("deployment_leaderboard", []),
+        )
 
 
 @dataclass

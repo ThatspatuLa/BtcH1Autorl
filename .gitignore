@@ -33,6 +33,8 @@ htmlcov/
 # Per-experiment run outputs (regenerable from code + data)
 results/*
 !results/.gitkeep
+runs/*
+!runs/.gitkeep
 
 # Per-experiment logs
 logs/*
