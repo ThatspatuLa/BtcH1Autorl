@@ -117,6 +117,7 @@ def test_config_to_from_dict():
 # ============================================================
 
 def test_random_dca_genome_in_range():
+    from evolution.operators import ALL_GRID_METHODS
     rng = random.Random(42)
     for _ in range(50):
         g = random_dca_genome(rng=rng)
@@ -124,7 +125,7 @@ def test_random_dca_genome_in_range():
         assert lo <= g.grid_params["pct"] <= hi
         lo_i, hi_i = DCA_PARAM_RANGES["max_layers"]
         assert lo_i <= g.max_dca_layers <= hi_i
-        assert g.grid_method.value == "fixed_pct"
+        assert g.grid_method in ALL_GRID_METHODS
 
 
 def test_random_candidate_genome_has_tp():
@@ -151,14 +152,14 @@ def test_random_dca_genome_search_space_includes_tp_pct():
     pcts = [s.grid_params["pct"] for s in samples]
     layers = [s.max_dca_layers for s in samples]
     tps = [s.grid_params["tp_pct"] for s in samples]
-    # grid_pct range: 0.003..0.08
-    assert all(0.003 <= p <= 0.08 for p in pcts)
-    assert max(pcts) - min(pcts) > 0.04  # actually varying
-    # max_layers: 2..12
-    assert all(2 <= n_layers <= 12 for n_layers in layers)
-    # tp_pct: 0.005..0.05 (new dimension)
-    assert all(0.005 <= t <= 0.05 for t in tps)
-    assert max(tps) - min(tps) > 0.02  # actually varying
+    # grid_pct range: 0.0025..0.0125
+    assert all(0.0025 <= p <= 0.0125 for p in pcts)
+    assert max(pcts) - min(pcts) > 0.005  # actually varying
+    # max_layers: 6..24
+    assert all(6 <= n_layers <= 24 for n_layers in layers)
+    # tp_pct: 0.002..0.010
+    assert all(0.002 <= t <= 0.010 for t in tps)
+    assert max(tps) - min(tps) > 0.003  # actually varying
 
 
 def test_random_dca_tp_synced_with_tp_genome():
@@ -244,6 +245,8 @@ def test_mutate_clamps_to_range():
         assert lo <= child.dca_genome.grid_params["pct"] <= hi
         lo_i, hi_i = DCA_PARAM_RANGES["max_layers"]
         assert lo_i <= child.dca_genome.max_dca_layers <= hi_i
+        tp_lo, tp_hi = DCA_PARAM_RANGES["tp_pct"]
+        assert tp_lo <= child.dca_genome.grid_params["tp_pct"] <= tp_hi
 
 
 def test_mutate_lineage():
@@ -274,13 +277,14 @@ def test_crossover_inherits_one_parent_per_param():
     )
 
 
-def test_crossover_keeps_tp_from_a():
+def test_crossover_keeps_tp_from_one_parent():
     rng = random.Random(42)
     a = random_candidate_genome(rng=rng, generation_index=0, tp_pct=0.03)
     b = random_candidate_genome(rng=rng, generation_index=0, tp_pct=0.07)
-    child = crossover(a, b, rng=rng)
-    # TP comes from A in Stage 10
-    assert child.tp_genome.exit_params["tp_pct"] == 0.03
+    for _ in range(50):
+        child = crossover(a, b, rng=rng)
+        # TP comes from one parent (50/50 chance per child)
+        assert child.tp_genome.exit_params["tp_pct"] in (0.03, 0.07)
 
 
 def test_crossover_lineage():

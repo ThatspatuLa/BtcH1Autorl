@@ -1,0 +1,421 @@
+"""PopulationBuilder — constructs the 500-candidate GA population per the spec.
+
+Split:
+  250 = exploit current volhigh survivor family
+  150 = explore new DCA families (RSI, MA-distance, Z-score, drawdown, ATR, trend)
+   75 = hybrid crossover between known and new families
+   25 = fresh random valid genomes
+
+Total: 500 candidates per generation.
+
+All generated genomes use only grid methods that OrderManager actually executes:
+fixed_pct, atr, volatility, drawdown_from_high, ma_distance, rsi_oversold,
+z_score, trend_adjusted.
+
+All generated genomes use only confirmation indicators that are fully computed
+and consumed: rsi_below, rsi_above, ma_above, ma_below, volatility_high,
+volatility_low.
+"""
+from __future__ import annotations
+
+import random
+import time
+from pathlib import Path
+from typing import Any
+
+from genome.schema import (
+    AllocationMethod,
+    CandidateGenome,
+    ComboMethod,
+    ConfirmationIndicator,
+    DcaGenome,
+    GridMethod,
+    LineageMetadata,
+    TpExitMethod,
+    TpGenome,
+    TriggerMode,
+)
+from evolution.operators import (
+    ALL_CONFIRMATION_INDICATORS,
+    ALL_GRID_METHODS,
+    DCA_PARAM_RANGES,
+    GRID_METHOD_DEFAULT_PARAMS,
+    INDICATOR_DEFAULT_PARAMS,
+    crossover,
+    mutate,
+    random_candidate_genome,
+)
+
+
+def _make_genome_id(generation_index: int, gid: int) -> str:
+    return f"genome_G{generation_index}_{gid:06d}"
+
+
+def _build_grid_params(
+    rng: random.Random,
+    grid_method: GridMethod,
+    base_pct: float | None = None,
+) -> dict[str, float]:
+    """Build grid_params for the given grid method with random values in range."""
+    defaults = dict(GRID_METHOD_DEFAULT_PARAMS.get(grid_method.value, {"pct": 0.015}))
+    params: dict[str, float] = {}
+
+    # pct is always present
+    if base_pct is not None:
+        params["pct"] = base_pct
+    else:
+        lo, hi = DCA_PARAM_RANGES["grid_pct"]
+        params["pct"] = rng.uniform(lo, hi)
+
+    # Method-specific params
+    if grid_method == GridMethod.ATR:
+        params["atr_multiplier"] = rng.uniform(1.0, 4.0)
+    elif grid_method == GridMethod.VOLATILITY:
+        params["base_pct"] = rng.uniform(0.005, 0.03)
+        params["vol_scale_factor"] = rng.uniform(0.1, 1.0)
+    elif grid_method == GridMethod.DRAWDOWN_FROM_HIGH:
+        params["drawdown_pct"] = rng.uniform(0.02, 0.10)
+    elif grid_method == GridMethod.MA_DISTANCE:
+        params["ma_distance_pct"] = rng.uniform(0.01, 0.08)
+    elif grid_method == GridMethod.RSI_OVERSOLD:
+        params["rsi_threshold"] = rng.uniform(20.0, 40.0)
+        params["oversold_depth_pct"] = rng.uniform(0.01, 0.05)
+    elif grid_method == GridMethod.Z_SCORE:
+        params["z_threshold"] = rng.uniform(1.0, 3.0)
+        params["lookback_std"] = rng.uniform(0.01, 0.05)
+    elif grid_method == GridMethod.TREND_ADJUSTED:
+        params["base_pct"] = rng.uniform(0.005, 0.03)
+        params["trend_multiplier"] = rng.uniform(0.1, 1.0)
+
+    return params
+
+
+def _pick_allocation(rng: random.Random) -> tuple[AllocationMethod, dict[str, float]]:
+    """Pick a random allocation method and its params."""
+    method = rng.choice([
+        AllocationMethod.EQUAL,
+        AllocationMethod.LINEAR_INCREASING,
+        AllocationMethod.CONTROLLED_EXP,
+        AllocationMethod.DRAWDOWN_ADJUSTED,
+        AllocationMethod.VOLATILITY_ADJUSTED,
+    ])
+    params: dict[str, float] = {}
+    if method == AllocationMethod.LINEAR_INCREASING:
+        params["increment_pct"] = rng.uniform(0.05, 0.5)
+    elif method == AllocationMethod.CONTROLLED_EXP:
+        params["multiplier"] = rng.uniform(1.2, 3.0)
+        params["max_layer_size_pct"] = rng.uniform(2.0, 10.0)
+    elif method == AllocationMethod.DRAWDOWN_ADJUSTED:
+        params["sensitivity"] = rng.uniform(1.0, 5.0)
+        params["min_size_pct"] = rng.uniform(0.3, 1.0)
+        params["max_size_pct"] = rng.uniform(2.0, 10.0)
+    elif method == AllocationMethod.VOLATILITY_ADJUSTED:
+        params["reference_vol"] = rng.uniform(0.01, 0.05)
+        params["min_size_pct"] = rng.uniform(0.3, 1.0)
+        params["max_size_pct"] = rng.uniform(2.0, 5.0)
+    return method, params
+
+
+def _pick_confirmations(
+    rng: random.Random,
+    required: list[ConfirmationIndicator] | None = None,
+    max_indicators: int = 3,
+) -> tuple[list[ConfirmationIndicator], dict[str, dict[str, float]]]:
+    """Pick random confirmation indicators, optionally requiring some."""
+    indicators: list[ConfirmationIndicator] = list(required or [])
+    remaining = [i for i in ALL_CONFIRMATION_INDICATORS if i not in indicators]
+    n_extra = rng.randint(0, min(max_indicators - len(indicators), len(remaining)))
+    if n_extra > 0:
+        indicators.extend(rng.sample(remaining, k=n_extra))
+    # Build params
+    params: dict[str, dict[str, float]] = {}
+    for ind in indicators:
+        if ind.value in INDICATOR_DEFAULT_PARAMS:
+            params[ind.value] = dict(INDICATOR_DEFAULT_PARAMS[ind.value])
+            # Tweak thresholds slightly
+            for key in params[ind.value]:
+                current = params[ind.value][key]
+                params[ind.value][key] = current + rng.gauss(0, abs(current) * 0.1)
+    return indicators, params
+
+
+def _make_candidate(
+    rng: random.Random,
+    generation_index: int,
+    gid: int,
+    grid_method: GridMethod,
+    grid_params: dict[str, float],
+    tp_pct: float,
+    max_layers: int,
+    cooldown: int,
+    allocation_method: AllocationMethod,
+    allocation_params: dict[str, float],
+    confirmation_indicators: list[ConfirmationIndicator],
+    indicator_params: dict[str, dict[str, float]],
+) -> CandidateGenome:
+    """Build a CandidateGenome from explicit params."""
+    grid_params_full = dict(grid_params)
+    grid_params_full["max_layers"] = max_layers
+    grid_params_full["tp_pct"] = tp_pct
+    grid_params_full["cooldown_candles"] = cooldown
+
+    dca = DcaGenome(
+        grid_method=grid_method,
+        grid_params=grid_params_full,
+        allocation_method=allocation_method,
+        allocation_params=allocation_params,
+        combo_method=ComboMethod.WEIGHTED_AVERAGE,
+        combo_params={},
+        trigger_mode=TriggerMode.PRICE_ONLY,
+        confirmation_indicators=confirmation_indicators,
+        indicator_params=indicator_params,
+        max_dca_layers=max_layers,
+    )
+    tp = TpGenome(
+        exit_method=TpExitMethod.FIXED,
+        exit_params={"tp_pct": tp_pct},
+    )
+    return CandidateGenome(
+        genome_id=_make_genome_id(generation_index, gid),
+        dca_genome=dca,
+        tp_genome=tp,
+        lineage=LineageMetadata(
+            parent_a_id=None,
+            parent_b_id=None,
+            generation_index=generation_index,
+            mutation_seed=rng.randint(0, 2**31 - 1),
+        ),
+    )
+
+
+def _random_pct(rng: random.Random) -> float:
+    lo, hi = DCA_PARAM_RANGES["grid_pct"]
+    return rng.uniform(lo, hi)
+
+
+def _random_tp(rng: random.Random) -> float:
+    lo, hi = DCA_PARAM_RANGES["tp_pct"]
+    return rng.uniform(lo, hi)
+
+
+def _random_layers(rng: random.Random) -> int:
+    lo, hi = DCA_PARAM_RANGES["max_layers"]
+    return rng.randint(int(lo), int(hi))
+
+
+def _random_cooldown(rng: random.Random) -> int:
+    lo, hi = DCA_PARAM_RANGES["cooldown_candles"]
+    return rng.randint(int(lo), int(hi))
+
+
+# ============================================================
+# Population builder
+# ============================================================
+
+def build_exploit_population(
+    rng: random.Random,
+    generation_index: int,
+    gid_start: int,
+    n: int,
+) -> list[CandidateGenome]:
+    """250 candidates: exploit the known volhigh survivor family.
+
+    Variations around: volatility_high confirmation + tight grid + quick TP.
+    Grid methods: mostly fixed_pct, some atr and volatility.
+    Confirmations: always include volatility_high, optionally add rsi_below or ma_below.
+    """
+    candidates: list[CandidateGenome] = []
+    gid = gid_start
+
+    for i in range(n):
+        # Grid method: 70% fixed_pct, 15% atr, 15% volatility
+        r = rng.random()
+        if r < 0.70:
+            gm = GridMethod.FIXED_PCT
+        elif r < 0.85:
+            gm = GridMethod.ATR
+        else:
+            gm = GridMethod.VOLATILITY
+
+        gp = _build_grid_params(rng, gm)
+        tp = _random_tp(rng)
+        ml = _random_layers(rng)
+        cd = _random_cooldown(rng)
+        am, ap = _pick_allocation(rng)
+
+        # Confirmations: always volhigh + optional second
+        required = [ConfirmationIndicator.VOLATILITY_HIGH]
+        # 40% chance to add rsi_below, 20% ma_below, 40% just volhigh alone
+        r2 = rng.random()
+        if r2 < 0.40:
+            required.append(ConfirmationIndicator.RSI_BELOW)
+        elif r2 < 0.60:
+            required.append(ConfirmationIndicator.MA_BELOW)
+        inds, ip = _pick_confirmations(rng, required=required)
+
+        # Vol threshold: 1.1–2.0 (spec range)
+        if "volatility_high" in ip:
+            ip["volatility_high"]["threshold"] = rng.uniform(1.1, 2.0)
+
+        candidates.append(_make_candidate(
+            rng, generation_index, gid, gm, gp, tp, ml, cd, am, ap, inds, ip,
+        ))
+        gid += 1
+
+    return candidates
+
+
+def build_explore_population(
+    rng: random.Random,
+    generation_index: int,
+    gid_start: int,
+    n: int,
+) -> list[CandidateGenome]:
+    """150 candidates: explore new DCA families.
+
+    Grid methods: rsi_oversold, ma_distance, z_score, drawdown_from_high,
+    trend_adjusted, atr (without volhigh confirmation).
+    Confirmations: varied, NOT centered on volhigh.
+    """
+    candidates: list[CandidateGenome] = []
+    gid = gid_start
+
+    explore_methods = [
+        GridMethod.RSI_OVERSOLD,
+        GridMethod.MA_DISTANCE,
+        GridMethod.Z_SCORE,
+        GridMethod.DRAWDOWN_FROM_HIGH,
+        GridMethod.TREND_ADJUSTED,
+        GridMethod.ATR,
+    ]
+
+    for i in range(n):
+        gm = rng.choice(explore_methods)
+        gp = _build_grid_params(rng, gm)
+        tp = _random_tp(rng)
+        ml = _random_layers(rng)
+        cd = _random_cooldown(rng)
+        am, ap = _pick_allocation(rng)
+
+        # Confirmations: varied, no volhigh bias
+        # 30% rsi_below, 20% ma_below, 20% rsi_above, 10% ma_above, 20% volhigh
+        r = rng.random()
+        required: list[ConfirmationIndicator] = []
+        if r < 0.30:
+            required = [ConfirmationIndicator.RSI_BELOW]
+        elif r < 0.50:
+            required = [ConfirmationIndicator.MA_BELOW]
+        elif r < 0.70:
+            required = [ConfirmationIndicator.RSI_ABOVE]
+        elif r < 0.80:
+            required = [ConfirmationIndicator.MA_ABOVE]
+        else:
+            required = [ConfirmationIndicator.VOLATILITY_HIGH]
+        inds, ip = _pick_confirmations(rng, required=required)
+
+        candidates.append(_make_candidate(
+            rng, generation_index, gid, gm, gp, tp, ml, cd, am, ap, inds, ip,
+        ))
+        gid += 1
+
+    return candidates
+
+
+def build_hybrid_population(
+    rng: random.Random,
+    generation_index: int,
+    gid_start: int,
+    n: int,
+    exploit_pool: list[CandidateGenome],
+) -> list[CandidateGenome]:
+    """75 candidates: hybrid crossover between volhigh family and new families.
+
+    Take one parent from exploit_pool (volhigh family) and one from a newly
+    generated explore-style genome, then crossover.
+    """
+    candidates: list[CandidateGenome] = []
+    gid = gid_start
+
+    explore_methods = [
+        GridMethod.RSI_OVERSOLD,
+        GridMethod.MA_DISTANCE,
+        GridMethod.Z_SCORE,
+        GridMethod.DRAWDOWN_FROM_HIGH,
+        GridMethod.TREND_ADJUSTED,
+    ]
+
+    for i in range(n):
+        # Parent A: from exploit pool (volhigh family)
+        parent_a = rng.choice(exploit_pool)
+
+        # Parent B: new explore-style genome
+        gm = rng.choice(explore_methods)
+        gp = _build_grid_params(rng, gm)
+        tp = _random_tp(rng)
+        ml = _random_layers(rng)
+        cd = _random_cooldown(rng)
+        am, ap = _pick_allocation(rng)
+        r = rng.random()
+        required: list[ConfirmationIndicator] = []
+        if r < 0.50:
+            required = [ConfirmationIndicator.VOLATILITY_HIGH]
+        elif r < 0.80:
+            required = [ConfirmationIndicator.RSI_BELOW]
+        else:
+            required = [ConfirmationIndicator.MA_BELOW]
+        inds, ip = _pick_confirmations(rng, required=required)
+        parent_b = _make_candidate(
+            rng, generation_index, gid + 10000, gm, gp, tp, ml, cd, am, ap, inds, ip,
+        )
+
+        child = crossover(parent_a, parent_b, rng=rng)
+        # Override the child's genome_id to our gid scheme
+        child.genome_id = _make_genome_id(generation_index, gid)
+        child.lineage.generation_index = generation_index
+        candidates.append(child)
+        gid += 1
+
+    return candidates
+
+
+def build_random_population(
+    rng: random.Random,
+    generation_index: int,
+    gid_start: int,
+    n: int,
+) -> list[CandidateGenome]:
+    """25 candidates: fresh random valid genomes from the full search space."""
+    candidates: list[CandidateGenome] = []
+    for i in range(n):
+        gid = gid_start + i
+        tp = _random_tp(rng)
+        g = random_candidate_genome(
+            rng=rng,
+            genome_id=_make_genome_id(generation_index, gid),
+            generation_index=generation_index,
+            tp_pct=tp,
+        )
+        # Ensure cooldown is set
+        g.dca_genome.grid_params["cooldown_candles"] = _random_cooldown(rng)
+        candidates.append(g)
+    return candidates
+
+
+def build_population(
+    rng: random.Random,
+    generation_index: int,
+    gid_start: int = 0,
+) -> list[CandidateGenome]:
+    """Build the full 500-candidate population per the spec.
+
+    Returns exactly 500 candidates:
+      250 exploit + 150 explore + 75 hybrid + 25 random
+    """
+    exploit = build_exploit_population(rng, generation_index, gid_start, 250)
+    explore = build_explore_population(rng, generation_index, gid_start + 250, 150)
+    hybrid = build_hybrid_population(rng, generation_index, gid_start + 400, 75, exploit)
+    rand = build_random_population(rng, generation_index, gid_start + 475, 25)
+
+    population = exploit + explore + hybrid + rand
+    assert len(population) == 500, f"Expected 500, got {len(population)}"
+    return population

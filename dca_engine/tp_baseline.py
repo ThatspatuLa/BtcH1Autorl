@@ -114,6 +114,8 @@ def backtest_with_fixed_tp(
     confirmation_indicators: list[str] | None = None,
     indicator_params: dict[str, dict[str, float]] | None = None,
     cooldown_candles: int = 0,
+    grid_method: str = "fixed_pct",
+    grid_params: dict[str, float] | None = None,
 ) -> BacktestResult:
     """Run a full backtest using the Stage 9 fixed TP baseline.
 
@@ -161,6 +163,8 @@ def backtest_with_fixed_tp(
         confirmation_indicators=confirmation_indicators,
         indicator_params=indicator_params,
         cooldown_candles=cooldown_candles,
+        grid_method=grid_method,
+        grid_params=grid_params,
         **tp_kwargs,
     )
 
@@ -169,19 +173,18 @@ def extract_dca_params_from_genome(genome: CandidateGenome | DcaGenome) -> dict[
     """Extract the Stage-9-relevant params from a CandidateGenome or DcaGenome.
 
     Reads from dca_genome:
-    - grid_params["pct"] → grid_pct
+    - grid_method → grid_method (default "fixed_pct")
+    - grid_params["pct"] → grid_pct (for fixed_pct; others use grid_params directly)
     - grid_params["max_layers"] → max_layers
     - grid_params["tp_pct"] → tp_pct
     - confirmation_indicators → list of indicator names
     - indicator_params → dict of {indicator_name: {param: value}}
-
-    Stage 9 only supports fixed_pct. Other grid_methods fall back to a
-    default of 0.015 because the OrderManager can't compute indicators.
-    Stage 10 (the full wiring) is a separate stage.
+    - grid_params["cooldown_candles"] → cooldown_candles
     """
     dca = genome.dca_genome if isinstance(genome, CandidateGenome) else genome
+    grid_method = dca.grid_method.value if hasattr(dca.grid_method, 'value') else str(dca.grid_method)
     grid_pct = 0.015  # default fallback
-    if dca.grid_method.value == "fixed_pct":
+    if grid_method == "fixed_pct":
         grid_pct = float(dca.grid_params.get("pct", 0.015))
     max_layers = int(
         dca.grid_params.get("max_layers", dca.max_dca_layers)
@@ -191,6 +194,8 @@ def extract_dca_params_from_genome(genome: CandidateGenome | DcaGenome) -> dict[
     # Build indicator_params from genome if present, else use defaults
     indicator_params = dca.indicator_params if hasattr(dca, 'indicator_params') and dca.indicator_params else _default_indicator_params(confirmation_indicators)
     cooldown_candles = int(dca.grid_params.get("cooldown_candles", 0))
+    # Build grid_params for the selected grid method
+    grid_params = _build_grid_params(grid_method, dca.grid_params, grid_pct)
     return {
         "grid_pct": grid_pct,
         "max_layers": max_layers,
@@ -198,7 +203,49 @@ def extract_dca_params_from_genome(genome: CandidateGenome | DcaGenome) -> dict[
         "confirmation_indicators": confirmation_indicators,
         "indicator_params": indicator_params,
         "cooldown_candles": cooldown_candles,
+        "grid_method": grid_method,
+        "grid_params": grid_params,
     }
+
+
+def _build_grid_params(grid_method: str, genome_grid_params: dict, grid_pct: float) -> dict[str, float]:
+    """Build the grid_params dict for the selected grid method.
+
+    Each grid method needs different params. This extracts the right subset
+    from the genome's grid_params and fills in defaults for missing keys.
+    """
+    params: dict[str, float] = {}
+    if grid_method == "fixed_pct":
+        params["pct"] = float(genome_grid_params.get("pct", grid_pct))
+    elif grid_method == "atr":
+        params["pct"] = float(genome_grid_params.get("pct", grid_pct))
+        params["atr_multiplier"] = float(genome_grid_params.get("atr_multiplier", 2.0))
+    elif grid_method == "volatility":
+        params["pct"] = float(genome_grid_params.get("pct", grid_pct))
+        params["base_pct"] = float(genome_grid_params.get("base_pct", 0.01))
+        params["vol_scale_factor"] = float(genome_grid_params.get("vol_scale_factor", 0.5))
+    elif grid_method == "drawdown_from_high":
+        params["pct"] = float(genome_grid_params.get("pct", grid_pct))
+        params["drawdown_pct"] = float(genome_grid_params.get("drawdown_pct", 0.05))
+    elif grid_method == "ma_distance":
+        params["pct"] = float(genome_grid_params.get("pct", grid_pct))
+        params["ma_distance_pct"] = float(genome_grid_params.get("ma_distance_pct", 0.03))
+    elif grid_method == "rsi_oversold":
+        params["pct"] = float(genome_grid_params.get("pct", grid_pct))
+        params["rsi_threshold"] = float(genome_grid_params.get("rsi_threshold", 30.0))
+        params["oversold_depth_pct"] = float(genome_grid_params.get("oversold_depth_pct", 0.02))
+    elif grid_method == "z_score":
+        params["pct"] = float(genome_grid_params.get("pct", grid_pct))
+        params["z_threshold"] = float(genome_grid_params.get("z_threshold", 1.5))
+        params["lookback_std"] = float(genome_grid_params.get("lookback_std", 0.02))
+    elif grid_method == "trend_adjusted":
+        params["pct"] = float(genome_grid_params.get("pct", grid_pct))
+        params["base_pct"] = float(genome_grid_params.get("base_pct", 0.015))
+        params["trend_multiplier"] = float(genome_grid_params.get("trend_multiplier", 0.5))
+    else:
+        # Unknown method — fall back to fixed_pct
+        params["pct"] = grid_pct
+    return params
 
 
 def _default_indicator_params(indicators: list[str]) -> dict[str, dict[str, float]]:

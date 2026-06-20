@@ -146,6 +146,8 @@ class CandidateEvaluator:
             confirmation_indicators=dca_params.get("confirmation_indicators", []),
             indicator_params=dca_params.get("indicator_params", {}),
             cooldown_candles=dca_params.get("cooldown_candles", 0),
+            grid_method=dca_params.get("grid_method", "fixed_pct"),
+            grid_params=dca_params.get("grid_params"),
         )
 
         # Stage 6 + 6.5: monthly fitness + deployment gates

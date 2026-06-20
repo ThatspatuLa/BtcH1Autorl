@@ -77,6 +77,8 @@ def backtest_candidate(
     vol_period: int = 20,
     ref_vol_period: int = 100,
     cooldown_candles: int = 0,
+    grid_method: str = "fixed_pct",
+    grid_params: dict[str, float] | None = None,
 ) -> BacktestResult:
     """Run one candidate backtest through the OHLCV dataframe.
 
@@ -90,6 +92,8 @@ def backtest_candidate(
         confirmation_indicators=confirmation_indicators,
         indicator_params=indicator_params,
         cooldown_candles=cooldown_candles,
+        grid_method=grid_method,
+        grid_params=grid_params,
     )
 
     # Pre-compute indicators if confirmations are active

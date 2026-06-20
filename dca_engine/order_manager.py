@@ -35,7 +35,7 @@ class OrderDecision:
 
 
 class OrderManager:
-    """Order manager with optional confirmation gating.
+    """Order manager with optional confirmation gating and pluggable grid methods.
 
     Args:
         grid_pct: spacing between DCA layers as % of average_entry (e.g. 0.015 = 1.5%)
@@ -45,6 +45,9 @@ class OrderManager:
         min_trade_qty: minimum qty for a layer (default 0.001 BTC)
         confirmation_indicators: list of indicator names to gate on (empty = no gating)
         indicator_params: dict of {indicator_name: {param: value}} for threshold overrides
+        cooldown_candles: candles to wait after cycle close before opening new cycle
+        grid_method: grid spacing method (default "fixed_pct")
+        grid_params: extra params for the grid method (e.g. {"pct": 0.015, "atr_multiplier": 2.0})
     """
 
     def __init__(
@@ -57,6 +60,8 @@ class OrderManager:
         confirmation_indicators: list[str] | None = None,
         indicator_params: dict[str, dict[str, float]] | None = None,
         cooldown_candles: int = 0,
+        grid_method: str = "fixed_pct",
+        grid_params: dict[str, float] | None = None,
     ) -> None:
         if grid_pct <= 0:
             raise ValueError(f"grid_pct must be > 0, got {grid_pct}")
@@ -74,6 +79,11 @@ class OrderManager:
         self.confirmation_indicators = confirmation_indicators or []
         self.indicator_params = indicator_params or {}
         self.cooldown_candles = cooldown_candles
+        self.grid_method = grid_method
+        self.grid_params = grid_params or {}
+        # For grid methods that need the pct fallback (fixed_pct uses grid_pct)
+        if "pct" not in self.grid_params:
+            self.grid_params["pct"] = grid_pct
 
     def _check_confirmations(
         self,
@@ -170,7 +180,31 @@ class OrderManager:
                 )
 
         # Trigger if price dropped grid_pct × layers_filled from average_entry
-        next_layer_target = average_entry * (1.0 - self.grid_pct * position_layers)
+        # For pluggable grid methods, compute the trigger price via dca_calc.
+        from dca_calc.grid_spacing import GridContext, compute_next_layer_price
+
+        ctx = GridContext(
+            current_price=current_price,
+            avg_entry=average_entry,
+            cycle_high=current_price,  # best-effort; state_machine tracks actual high
+            layers_filled=position_layers,
+            n_layers_total=self.max_layers,
+            atr=indicators.atr if indicators else None,
+            volatility=indicators.volatility if indicators else None,
+            ma_value=indicators.ma if indicators else None,
+            rsi_value=indicators.rsi if indicators else None,
+            z_score=indicators.z_score if indicators else None,
+            trend_strength=indicators.trend_strength if indicators else None,
+            reference_high=average_entry,
+        )
+        next_layer_target = compute_next_layer_price(
+            grid_method=self.grid_method,
+            grid_params=self.grid_params,
+            ctx=ctx,
+        )
+        if next_layer_target is None:
+            # Grid method couldn't compute (missing indicators) — skip
+            return OrderDecision(action=OrderAction.NONE, reason="grid_method_no_price")
         if current_price <= next_layer_target:
             qty = stake_amount / current_price
             if qty < self.min_trade_qty:

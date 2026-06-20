@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+"""run_continuous_evolution.py — Stage 10 DCA evolution with lock, resume, and Discord reporting.
+
+Usage:
+    python3 scripts/run_continuous_evolution.py [--output-dir runs/evo_continuous] [--wall-time 7200]
+
+Features:
+    - Lock file prevents overlapping runs
+    - Timestamped output directories per run
+    - Auto-resume from generation_history.json
+    - Reports to Discord channel 1500437358934233219 on: start, new best deployment,
+      completion, failure, and every 5 generations
+    - PopulationBuilder 250/150/75/25 split
+    - Only generates valid executable genomes (all grid methods wired in OrderManager)
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import random
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+# Ensure project root on path
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+import pandas as pd
+
+from evolution.config import EvolutionConfig
+from evolution.harness import EvolutionHarness, HarnessHooks
+from evolution.population_builder import build_population
+
+
+# ============================================================
+# Lock file — prevents overlapping runs
+# ============================================================
+
+LOCK_FILE_PATH = ROOT / "runs" / "evolution.lock"
+
+
+def acquire_lock() -> bool:
+    """Try to acquire the evolution lock. Returns True if acquired."""
+    LOCK_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fh = open(LOCK_FILE_PATH, "w")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fh.write(str(os.getpid()))
+        fh.flush()
+        return True
+    except (IOError, OSError):
+        return False
+
+
+def release_lock() -> None:
+    """Release the evolution lock."""
+    try:
+        if LOCK_FILE_PATH.exists():
+            LOCK_FILE_PATH.unlink()
+    except OSError:
+        pass
+
+
+# ============================================================
+# Discord reporting
+# ============================================================
+
+DISCORD_CHANNEL_ID = "1500437358934233219"
+
+
+def send_discord(message: str) -> None:
+    """Send a message to the Discord channel via Hermes send_message tool.
+
+    This writes to a file that the cron agent picks up, since we can't call
+    Hermes tools directly from a Python subprocess.
+    """
+    queue_dir = ROOT / "runs" / "discord_queue"
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    ts = int(time.time() * 1000)
+    msg_file = queue_dir / f"msg_{ts}.json"
+    payload = {
+        "channel": DISCORD_CHANNEL_ID,
+        "message": message,
+        "timestamp": time.time(),
+    }
+    msg_file.write_text(json.dumps(payload))
+
+
+# ============================================================
+# Approved queue — only run experiments in the approved list
+# ============================================================
+
+APPROVED_EXPERIMENTS: list[str] = [
+    "stage10_continuous",
+    "stage10_seeded",
+    "stage10_explore",
+]
+
+
+def is_approved(experiment_id: str) -> bool:
+    """Check if the experiment is in the approved queue."""
+    return experiment_id in APPROVED_EXPERIMENTS
+
+
+# ============================================================
+# Main runner
+# ============================================================
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Stage 10 Continuous DCA Evolution")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Base output directory (default: runs/evo_continuous_<timestamp>)",
+    )
+    parser.add_argument(
+        "--wall-time-seconds",
+        type=int,
+        default=7200,
+        help="Wall-time cap per run in seconds (default 7200 = 2h)",
+    )
+    parser.add_argument(
+        "--max-generations",
+        type=int,
+        default=20,
+        help="Max generations per run (default 20)",
+    )
+    parser.add_argument(
+        "--candidates",
+        type=int,
+        default=500,
+        help="Candidates per generation (default 500)",
+    )
+    parser.add_argument(
+        "--elite-count",
+        type=int,
+        default=20,
+        help="Elite count (default 20)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="RNG seed (default: random)",
+    )
+    parser.add_argument(
+        "--experiment-id",
+        default="stage10_continuous",
+        help="Experiment ID (must be in approved queue)",
+    )
+    parser.add_argument(
+        "--data",
+        type=str,
+        default=str(ROOT / "data" / "processed" / "btc_h1_5y.feather"),
+        help="Path to BTC H1 feather data",
+    )
+    args = parser.parse_args()
+
+    # Check approved queue
+    if not is_approved(args.experiment_id):
+        print(f"[evo] ERROR: experiment '{args.experiment_id}' not in approved queue: {APPROVED_EXPERIMENTS}")
+        return 1
+
+    # Acquire lock
+    if not acquire_lock():
+        print("[evo] ERROR: Another evolution run is already running (lock file exists). Exiting.")
+        return 1
+
+    try:
+        return _run_evolution(args)
+    finally:
+        release_lock()
+
+
+def _run_evolution(args: argparse.Namespace) -> int:
+    """Run one evolution pass. Returns exit code."""
+
+    # Timestamped output directory
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    output_dir = Path(args.output_dir or f"runs/evo_continuous_{ts}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load data
+    data_path = Path(args.data)
+    if not data_path.exists():
+        msg = f"[evo] ERROR: data file not found: {data_path}"
+        print(msg)
+        send_discord(f"❌ {msg}")
+        return 1
+
+    print(f"[evo] Loading data: {data_path}")
+    df = pd.read_feather(data_path)
+    print(f"[evo] Loaded {len(df):,} rows")
+
+    # RNG
+    seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
+    rng = random.Random(seed)
+
+    # Config
+    config = EvolutionConfig(
+        candidates_per_gen=args.candidates,
+        elite_count=args.elite_count,
+        max_generations=args.max_generations,
+        wall_time_seconds=args.wall_time_seconds,
+        stagnation_generations=5,
+        all_rejected_generations=3,
+        parallel_workers=8,
+        output_dir=str(output_dir),
+        experiment_id=args.experiment_id,
+        base_seed=seed,
+    )
+
+    # Build seeded population for gen 0
+    print(f"[evo] Building seeded population of {args.candidates}")
+    seeded_pop = build_population(rng, generation_index=0)
+    print(f"[evo] Seeded population built: {len(seeded_pop)} candidates")
+
+    # Population split report
+    pop_report = _analyze_population(seeded_pop)
+    print(f"[evo] Population split: {json.dumps(pop_report, indent=2)}")
+
+    # Discord: start notification
+    start_msg = (
+        f"🧬 **Stage 10 Evolution Started**\n"
+        f"Experiment: `{args.experiment_id}`\n"
+        f"Output: `{output_dir.name}`\n"
+        f"Config: {args.candidates} cands/gen, max {args.max_generations} gens, "
+        f"wall-time {args.wall_time_seconds}s\n"
+        f"Seed: {seed}\n"
+        f"Population: {pop_report['exploit']} exploit + {pop_report['explore']} explore + "
+        f"{pop_report['hybrid']} hybrid + {pop_report['random']} random = {len(seeded_pop)}\n"
+        f"Grid methods: {', '.join(pop_report['grid_methods_used'])}\n"
+        f"Confirmations: {', '.join(pop_report['confirmations_used'])}"
+    )
+    send_discord(start_msg)
+    print(f"[evo] Discord notification sent")
+
+    # Track best deployment fitness for reporting
+    best_deploy_fitness = 0.0
+    best_deploy_genome_id = ""
+    n_deploy_passing_total = 0
+
+    # Hooks for Discord reporting
+    def on_gen_end(record: Any) -> None:
+        nonlocal best_deploy_fitness, best_deploy_genome_id, n_deploy_passing_total
+        n_deploy_passing_total += record.n_deployment_passing
+
+        # Check for new best deployment candidate
+        if record.deployment_leaderboard:
+            top = record.deployment_leaderboard[0]
+            if top["deployment_fitness"] > best_deploy_fitness:
+                best_deploy_fitness = top["deployment_fitness"]
+                best_deploy_genome_id = top["genome_id"]
+                send_discord(
+                    f"🏆 **New Best Deployment Candidate** (Gen {record.generation_index})\n"
+                    f"Genome: `{top['genome_id']}` | Fitness: {top['deployment_fitness']:.6f}\n"
+                    f"Consistency: {top['consistency_ratio']:.4f}"
+                )
+
+        # Every 5 generations: summary
+        if record.generation_index % 5 == 0:
+            send_discord(
+                f"📊 **Gen {record.generation_index} Summary**\n"
+                f"Passed: {record.n_passed}/{record.n_candidates} | "
+                f"Deploy-passing: {record.n_deployment_passing} | "
+                f"Best fitness: {record.best_fitness:.6f} | "
+                f"Median: {record.median_fitness:.6f}\n"
+                f"Total deploy-passing so far: {n_deploy_passing_total}"
+            )
+
+    hooks = HarnessHooks(on_generation_end=on_gen_end)
+
+    # Run evolution
+    print(f"[evo] Starting evolution...")
+    harness = EvolutionHarness(
+        config=config,
+        df=df,
+        hooks=hooks,
+        seeded_population=seeded_pop,
+        rng=rng,
+    )
+
+    t0 = time.time()
+    summary = harness.run(resume=True)
+    elapsed = time.time() - t0
+
+    # Final report
+    final_msg = (
+        f"✅ **Stage 10 Evolution Complete**\n"
+        f"Experiment: `{args.experiment_id}`\n"
+        f"Status: {summary.termination_reason}\n"
+        f"Generations: {summary.generations_completed}/{summary.generations_planned}\n"
+        f"Total candidates: {summary.total_candidates_evaluated}\n"
+        f"Best fitness: {summary.best_fitness_ever:.6f}\n"
+        f"Best genome: `{summary.best_genome_id_ever}`\n"
+        f"Total deploy-passing: {n_deploy_passing_total}\n"
+        f"Runtime: {elapsed:.1f}s\n"
+        f"Output: `{output_dir.name}`"
+    )
+    send_discord(final_msg)
+
+    # Write final status
+    status = {
+        "termination_reason": summary.termination_reason,
+        "generations_completed": summary.generations_completed,
+        "generations_planned": summary.generations_planned,
+        "total_candidates_evaluated": summary.total_candidates_evaluated,
+        "best_fitness_ever": summary.best_fitness_ever,
+        "best_genome_id_ever": summary.best_genome_id_ever,
+        "best_candidate_id_ever": summary.best_candidate_id_ever,
+        "n_deployment_passing_total": n_deploy_passing_total,
+        "total_runtime_seconds": elapsed,
+        "output_dir": str(output_dir),
+        "seed": seed,
+        "population_split": pop_report,
+    }
+    (output_dir / "final_status.json").write_text(json.dumps(status, indent=2, default=str))
+    print(f"[evo] Wrote final_status.json")
+    print(f"[evo] Done. Status: {summary.termination_reason}")
+
+    return 0
+
+
+def _analyze_population(population: list[Any]) -> dict[str, Any]:
+    """Analyze the population composition for reporting."""
+    grid_methods: dict[str, int] = {}
+    confirmations: dict[str, int] = {}
+    allocation_methods: dict[str, int] = {}
+
+    for g in population:
+        gm = g.dca_genome.grid_method.value
+        grid_methods[gm] = grid_methods.get(gm, 0) + 1
+        am = g.dca_genome.allocation_method.value
+        allocation_methods[am] = allocation_methods.get(am, 0) + 1
+        for c in g.dca_genome.confirmation_indicators:
+            cv = c.value
+            confirmations[cv] = confirmations.get(cv, 0) + 1
+
+    # Count by family (exploit = has volhigh, explore = no volhigh, hybrid = crossover)
+    n_exploit = sum(1 for g in population if any(
+        c.value == "volatility_high" for c in g.dca_genome.confirmation_indicators
+    ))
+
+    return {
+        "total": len(population),
+        "exploit": n_exploit,
+        "explore": len(population) - n_exploit,
+        "hybrid": sum(1 for g in population if g.lineage.parent_b_id is not None),
+        "random": sum(1 for g in population if g.lineage.parent_a_id is None and g.lineage.parent_b_id is None),
+        "grid_methods_used": sorted(grid_methods.keys()),
+        "confirmations_used": sorted(confirmations.keys()),
+        "allocation_methods_used": sorted(allocation_methods.keys()),
+        "grid_method_counts": grid_methods,
+        "confirmation_counts": confirmations,
+    }
+
+
+if __name__ == "__main__":
+    sys.exit(main())
