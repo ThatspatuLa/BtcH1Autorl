@@ -281,8 +281,28 @@ def mutate(
     rng = rng or random.Random()
     parent_dca = parent.dca_genome
 
+    # Normalize grid_method to enum (may be string if loaded from JSON)
+    raw_gm = parent_dca.grid_method
+    if isinstance(raw_gm, str):
+        try:
+            current_grid_method = GridMethod(raw_gm)
+        except ValueError:
+            current_grid_method = GridMethod.FIXED_PCT
+    else:
+        current_grid_method = raw_gm
+
+    # --- Allocation method (may be string if loaded from JSON) ---
+    raw_am = parent_dca.allocation_method
+    if isinstance(raw_am, str):
+        try:
+            current_alloc_method = AllocationMethod(raw_am)
+        except ValueError:
+            current_alloc_method = AllocationMethod.EQUAL
+    else:
+        current_alloc_method = raw_am
+
     # --- Grid method (rare structural mutation) ---
-    new_grid_method = parent_dca.grid_method
+    new_grid_method = current_grid_method
     if rng.random() < mutation_rate * 0.15:  # 15% of mutation_rate chance
         new_grid_method = rng.choice(ALL_GRID_METHODS)
 
@@ -337,7 +357,7 @@ def mutate(
                 new_grid_params[param_key] = new_val
 
     # --- Allocation method (rare structural mutation) ---
-    new_alloc_method = parent_dca.allocation_method
+    new_alloc_method = current_alloc_method
     new_alloc_params = dict(parent_dca.allocation_params)
     if rng.random() < mutation_rate * 0.15:
         new_alloc_method = rng.choice(ALL_ALLOCATION_METHODS)
@@ -434,11 +454,33 @@ def crossover(
     a_dca = parent_a.dca_genome
     b_dca = parent_b.dca_genome
 
+    # Normalize enum fields (may be strings if loaded from JSON)
+    def _normalize_grid_method(raw):
+        if isinstance(raw, str):
+            try:
+                return GridMethod(raw)
+            except ValueError:
+                return GridMethod.FIXED_PCT
+        return raw
+
+    def _normalize_alloc_method(raw):
+        if isinstance(raw, str):
+            try:
+                return AllocationMethod(raw)
+            except ValueError:
+                return AllocationMethod.EQUAL
+        return raw
+
+    a_grid_method = _normalize_grid_method(a_dca.grid_method)
+    b_grid_method = _normalize_grid_method(b_dca.grid_method)
+    a_alloc_method = _normalize_alloc_method(a_dca.allocation_method)
+    b_alloc_method = _normalize_alloc_method(b_dca.allocation_method)
+
     # Grid method: pick from one parent
-    new_grid_method = a_dca.grid_method if rng.random() < 0.5 else b_dca.grid_method
+    new_grid_method = a_grid_method if rng.random() < 0.5 else b_grid_method
 
     # Allocation method: pick from one parent
-    new_alloc_method = a_dca.allocation_method if rng.random() < 0.5 else b_dca.allocation_method
+    new_alloc_method = a_alloc_method if rng.random() < 0.5 else b_alloc_method
 
     # Grid params: per-param crossover
     merged_grid: dict[str, float] = {}
@@ -464,12 +506,12 @@ def crossover(
         merged_grid["cooldown_candles"] = rng.randint(0, 12)
 
     # Allocation params: merge from the chosen parent's method
-    if new_alloc_method == a_dca.allocation_method:
+    if new_alloc_method == a_alloc_method:
         merged_alloc = dict(a_dca.allocation_params)
     else:
         merged_alloc = dict(b_dca.allocation_params)
     # If the other parent has params for this method, blend
-    other_alloc = b_dca.allocation_params if new_alloc_method == a_dca.allocation_method else a_dca.allocation_params
+    other_alloc = b_dca.allocation_params if new_alloc_method == a_alloc_method else a_dca.allocation_params
     for key in merged_alloc:
         if key in other_alloc and rng.random() < 0.5:
             merged_alloc[key] = float(other_alloc[key])

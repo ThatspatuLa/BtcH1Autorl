@@ -113,11 +113,17 @@ class DcaGenome:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         # Convert enums to their string values for JSON safety
-        d["grid_method"] = self.grid_method.value
-        d["allocation_method"] = self.allocation_method.value
-        d["combo_method"] = self.combo_method.value
-        d["trigger_mode"] = self.trigger_mode.value
-        d["confirmation_indicators"] = [c.value for c in self.confirmation_indicators]
+        # Handle both enum and string (when reconstructed from JSON)
+        def _enum_str(val):
+            return val.value if hasattr(val, 'value') else str(val)
+        d["grid_method"] = _enum_str(self.grid_method)
+        d["allocation_method"] = _enum_str(self.allocation_method)
+        d["combo_method"] = _enum_str(self.combo_method)
+        d["trigger_mode"] = _enum_str(self.trigger_mode)
+        d["confirmation_indicators"] = [
+            c.value if hasattr(c, 'value') else str(c)
+            for c in self.confirmation_indicators
+        ]
         return d
 
 
@@ -130,7 +136,7 @@ class TpGenome:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
-        d["exit_method"] = self.exit_method.value
+        d["exit_method"] = self.exit_method.value if hasattr(self.exit_method, 'value') else str(self.exit_method)
         d["sub_exits"] = [s.to_dict() for s in self.sub_exits]
         return d
 
