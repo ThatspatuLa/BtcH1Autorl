@@ -19,9 +19,10 @@ Usage:
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 
 class FrozenSettingsDict(Mapping):
@@ -115,7 +116,7 @@ class SettingsError(ValueError):
 def _load_json(path: Path) -> dict:
     if not path.exists():
         raise SettingsError(f"Config file not found: {path}")
-    with open(path, "r") as f:
+    with open(path) as f:
         try:
             data = json.load(f)
         except json.JSONDecodeError as e:
@@ -178,7 +179,7 @@ class Settings:
     Access via attribute style (settings.leverage) or dict style (settings["leverage"]).
     """
 
-    __slots__ = ("_data", "_freqtrade_path", "_experiment_path", "_research_path")
+    __slots__ = ("_data", "_experiment_path", "_freqtrade_path", "_research_path")
 
     def __init__(
         self,
@@ -226,7 +227,7 @@ class Settings:
         freqtrade_path: Path | str,
         experiment_path: Path | str,
         research_path: Path | str,
-    ) -> "Settings":
+    ) -> Settings:
         ft = _load_json(Path(freqtrade_path))
         ex = _load_json(Path(experiment_path))
         rs = _load_json(Path(research_path))
@@ -240,11 +241,11 @@ class Settings:
         # Only invoked when normal lookup fails — dict lookup on _data
         try:
             return self._data[name]
-        except KeyError:
+        except KeyError as err:
             raise AttributeError(
                 f"Settings has no attribute or key '{name}'. "
-                f"Available keys: {sorted(list(self._data.keys()))[:20]}..."
-            )
+                f"Available keys: {sorted(self._data.keys())[:20]}..."
+            ) from err
 
     def __getitem__(self, key: str) -> Any:
         return self._data[key]

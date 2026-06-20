@@ -13,7 +13,6 @@ import pytest
 
 from configs.loader import FrozenSettingsDict, Settings, SettingsError
 
-
 pytestmark = pytest.mark.stage1
 
 
@@ -142,7 +141,7 @@ def test_settings_rejects_deprecated_ticker_interval(project_root, tmp_path):
     cfg = json.loads((project_root / "configs" / "freqtrade" / "config.json").read_text())
     cfg["ticker_interval"] = "1h"  # old key reintroduced
     bad_ft.write_text(json.dumps(cfg))
-    with pytest.raises(SettingsError, match="ticker_interval.*deprecated"):
+    with pytest.raises(SettingsError, match=r"ticker_interval.*deprecated"):
         Settings.from_files(
             freqtrade_path=bad_ft,
             experiment_path=project_root / "configs" / "experiments" / "default.json",

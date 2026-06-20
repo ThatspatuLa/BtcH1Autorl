@@ -13,12 +13,10 @@ import json
 import pytest
 
 from configs.metadata import (
-    RunMetadata,
     load_run_metadata,
     make_run_metadata,
     write_run_metadata,
 )
-
 
 pytestmark = pytest.mark.stage1
 

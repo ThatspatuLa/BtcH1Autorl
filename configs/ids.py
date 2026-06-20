@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 _SLUG_RE = re.compile(r"[^a-z0-9_]+")
 _SLUG_MAX_LEN = 40
@@ -43,7 +43,7 @@ def make_experiment_id(
     if not slug:
         raise ValueError("slug must contain at least one alphanumeric character")
     if when is None:
-        when = datetime.now(timezone.utc)
+        when = datetime.now(UTC)
     return f"{when.strftime('%Y%m%d_%H%M%S')}_gen{generation}_{slug}"
 
 

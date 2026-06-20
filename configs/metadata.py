@@ -14,8 +14,8 @@ from __future__ import annotations
 import json
 import platform
 import subprocess
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +49,7 @@ class RunMetadata:
 
 
 def _now_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _git_commit(repo_root: Path) -> tuple[str, bool]:
@@ -122,6 +122,6 @@ def write_run_metadata(meta: RunMetadata, path: Path | None = None) -> Path:
 
 
 def load_run_metadata(path: Path | str) -> RunMetadata:
-    with open(path, "r") as f:
+    with open(path) as f:
         data = json.load(f)
     return RunMetadata(**data)

@@ -14,21 +14,20 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Add project root to sys.path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from configs import Settings
-from configs.ids import (
+from configs import Settings  # noqa: E402
+from configs.ids import (  # noqa: E402
+    is_valid_candidate_id,
+    is_valid_experiment_id,
+    is_valid_genome_id,
     make_candidate_id,
     make_experiment_id,
     make_genome_id,
     make_run_metadata_id,
-    is_valid_experiment_id,
-    is_valid_candidate_id,
-    is_valid_genome_id,
 )
-from configs.metadata import make_run_metadata, write_run_metadata
+from configs.metadata import make_run_metadata, write_run_metadata  # noqa: E402
 
 
 def main() -> int:
@@ -125,7 +124,7 @@ def main() -> int:
     print("=" * 70)
     print(f"  Settings loaded:    YES ({len(s)} keys)")
     print(f"  IDs generated:      experiment={eid[:40]}...")
-    print(f"  Metadata roundtrip: YES")
+    print("  Metadata roundtrip: YES")
     print(f"  Freqtrade compat:   YES (timeframe={ft_loaded['timeframe']}, leverage={ft_loaded['leverage']})")
     print()
     print("READY FOR GATE 1 REVIEW")

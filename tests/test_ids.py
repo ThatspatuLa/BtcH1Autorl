@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -24,7 +24,6 @@ from configs.ids import (
     make_run_metadata_id,
 )
 
-
 pytestmark = pytest.mark.stage1
 
 
@@ -34,7 +33,7 @@ CANDIDATE_RE = re.compile(r"^\d{8}_\d{6}_gen\d+_[a-z0-9_]+_cand\d{4}$")
 
 def test_experiment_id_format_with_explicit_when():
     """experiment_id must match YYYYMMDD_HHMMSS_gen{N}_{slug}."""
-    when = datetime(2026, 6, 20, 19, 45, 0, tzinfo=timezone.utc)
+    when = datetime(2026, 6, 20, 19, 45, 0, tzinfo=UTC)
     eid = make_experiment_id(generation=0, slug="smoke_v1", when=when)
     assert eid == "20260620_194500_gen0_smoke_v1"
     assert EXPERIMENT_RE.match(eid)
@@ -51,7 +50,7 @@ def test_experiment_id_format_with_auto_when():
 
 def test_experiment_id_slug_normalised():
     """Slug must be lowercased and stripped of non-alphanumerics."""
-    eid = make_experiment_id(generation=0, slug="My Test Run 1!", when=datetime(2026, 6, 20, tzinfo=timezone.utc))
+    eid = make_experiment_id(generation=0, slug="My Test Run 1!", when=datetime(2026, 6, 20, tzinfo=UTC))
     assert "my_test_run_1" in eid
 
 
