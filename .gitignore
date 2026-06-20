@@ -47,3 +47,8 @@ data/processed/*
 # Generated genomes (only examples are committed)
 genomes/*.json
 !genomes/examples/*.json
+
+# Stage 2 raw data (regenerate from Binance)
+data/raw/*.feather
+data/processed/*.feather
+data/metadata/worst_adverse_move_candles.csv

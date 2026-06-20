@@ -1,0 +1,12 @@
+{
+  "start_time": "2021-11-10T17:00:00",
+  "end_time": "2022-11-21T21:00:00",
+  "duration_hours": 9028,
+  "duration_days": 376.1666666666667,
+  "percentage_decline": 0.7719848663243954,
+  "start_price": 63417.97,
+  "end_price": 15649.52,
+  "recovery_time_hours": 11235,
+  "candle_path_csv": "/home/spatula/Projects/BtcH1Autorl/data/metadata/worst_adverse_move_candles.csv",
+  "replay_file_path": "/home/spatula/Projects/BtcH1Autorl/data/metadata/worst_adverse_move_candles.csv"
+}
