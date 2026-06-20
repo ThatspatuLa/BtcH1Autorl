@@ -76,6 +76,7 @@ def backtest_candidate(
     ma_period: int = 200,
     vol_period: int = 20,
     ref_vol_period: int = 100,
+    cooldown_candles: int = 0,
 ) -> BacktestResult:
     """Run one candidate backtest through the OHLCV dataframe.
 
@@ -88,6 +89,7 @@ def backtest_candidate(
         symbol=symbol,
         confirmation_indicators=confirmation_indicators,
         indicator_params=indicator_params,
+        cooldown_candles=cooldown_candles,
     )
 
     # Pre-compute indicators if confirmations are active

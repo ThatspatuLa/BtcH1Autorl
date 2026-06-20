@@ -145,6 +145,7 @@ class CandidateEvaluator:
             max_layers=dca_params["max_layers"],
             confirmation_indicators=dca_params.get("confirmation_indicators", []),
             indicator_params=dca_params.get("indicator_params", {}),
+            cooldown_candles=dca_params.get("cooldown_candles", 0),
         )
 
         # Stage 6 + 6.5: monthly fitness + deployment gates

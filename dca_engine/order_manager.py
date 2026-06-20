@@ -56,6 +56,7 @@ class OrderManager:
         min_trade_qty: float = 0.001,
         confirmation_indicators: list[str] | None = None,
         indicator_params: dict[str, dict[str, float]] | None = None,
+        cooldown_candles: int = 0,
     ) -> None:
         if grid_pct <= 0:
             raise ValueError(f"grid_pct must be > 0, got {grid_pct}")
@@ -63,6 +64,8 @@ class OrderManager:
             raise ValueError(f"tp_pct must be > 0, got {tp_pct}")
         if max_layers < 1:
             raise ValueError(f"max_layers must be >= 1, got {max_layers}")
+        if cooldown_candles < 0:
+            raise ValueError(f"cooldown_candles must be >= 0, got {cooldown_candles}")
         self.grid_pct = grid_pct
         self.tp_pct = tp_pct
         self.max_layers = max_layers
@@ -70,6 +73,7 @@ class OrderManager:
         self.min_trade_qty = min_trade_qty
         self.confirmation_indicators = confirmation_indicators or []
         self.indicator_params = indicator_params or {}
+        self.cooldown_candles = cooldown_candles
 
     def _check_confirmations(
         self,

@@ -113,6 +113,7 @@ def backtest_with_fixed_tp(
     symbol: str = "BTC/USDT",
     confirmation_indicators: list[str] | None = None,
     indicator_params: dict[str, dict[str, float]] | None = None,
+    cooldown_candles: int = 0,
 ) -> BacktestResult:
     """Run a full backtest using the Stage 9 fixed TP baseline.
 
@@ -159,6 +160,7 @@ def backtest_with_fixed_tp(
         symbol=symbol,
         confirmation_indicators=confirmation_indicators,
         indicator_params=indicator_params,
+        cooldown_candles=cooldown_candles,
         **tp_kwargs,
     )
 
@@ -188,12 +190,14 @@ def extract_dca_params_from_genome(genome: CandidateGenome | DcaGenome) -> dict[
     confirmation_indicators = [c.value for c in dca.confirmation_indicators]
     # Build indicator_params from genome if present, else use defaults
     indicator_params = dca.indicator_params if hasattr(dca, 'indicator_params') and dca.indicator_params else _default_indicator_params(confirmation_indicators)
+    cooldown_candles = int(dca.grid_params.get("cooldown_candles", 0))
     return {
         "grid_pct": grid_pct,
         "max_layers": max_layers,
         "tp_pct": tp_pct,
         "confirmation_indicators": confirmation_indicators,
         "indicator_params": indicator_params,
+        "cooldown_candles": cooldown_candles,
     }
 
 

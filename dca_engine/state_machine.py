@@ -84,6 +84,7 @@ def run_state_machine(
     n_closed = 0
     peak_equity = initial_deposit
     trough_equity = initial_deposit
+    cooldown_remaining = 0  # candles remaining before new cycle can open
 
     for _idx, row in df.iterrows():
         current_price = float(row["close"])
@@ -128,22 +129,28 @@ def run_state_machine(
                 closed_trades.append(cycle.to_trade_record())
                 del active_cycles[cid]
                 n_closed += 1
+                # Start cooldown
+                cooldown_remaining = order_manager.cooldown_candles
 
         # 2) Decide on new OPEN or ADD_LAYER (only one decision per candle in Stage 3)
         # Try to open a new cycle if no active ones, OR add a layer to existing
         decision = None
         if not active_cycles:
-            # Try OPEN
-            decision = order_manager.decide(
-                cycle_id=_next_cycle_id(),
-                current_price=current_price,
-                current_time=current_time,
-                position_layers=0,
-                average_entry=0.0,
-                has_open_position=False,
-                stake_amount=stake_amount,
-                indicators=ind_snapshot,
-            )
+            # Respect cooldown
+            if cooldown_remaining > 0:
+                cooldown_remaining -= 1
+            else:
+                # Try OPEN
+                decision = order_manager.decide(
+                    cycle_id=_next_cycle_id(),
+                    current_price=current_price,
+                    current_time=current_time,
+                    position_layers=0,
+                    average_entry=0.0,
+                    has_open_position=False,
+                    stake_amount=stake_amount,
+                    indicators=ind_snapshot,
+                )
         else:
             # Use first active cycle
             cid = next(iter(active_cycles.keys()))
