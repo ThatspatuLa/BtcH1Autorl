@@ -142,6 +142,24 @@ def main() -> int:
         help="Elite count (default 20)",
     )
     parser.add_argument(
+        "--random-injection",
+        type=int,
+        default=180,
+        help="Fresh random candidates per generation (default 180)",
+    )
+    parser.add_argument(
+        "--mutation-rate",
+        type=float,
+        default=0.45,
+        help="Per-param mutation rate, 0..1 (default 0.45 — 'push harder' from 0.30)",
+    )
+    parser.add_argument(
+        "--crossover-rate",
+        type=float,
+        default=0.40,
+        help="Fraction of children from crossover (default 0.40)",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -204,6 +222,9 @@ def _run_evolution(args: argparse.Namespace) -> int:
     config = EvolutionConfig(
         candidates_per_gen=args.candidates,
         elite_count=args.elite_count,
+        random_injection=args.random_injection,
+        mutation_rate=args.mutation_rate,
+        crossover_rate=args.crossover_rate,
         max_generations=args.max_generations,
         wall_time_seconds=args.wall_time_seconds,
         stagnation_generations=5,
@@ -212,6 +233,12 @@ def _run_evolution(args: argparse.Namespace) -> int:
         output_dir=str(output_dir),
         experiment_id=args.experiment_id,
         base_seed=seed,
+    )
+
+    print(
+        f"[evo] GA config: cands={args.candidates} elites={args.elite_count} "
+        f"random={args.random_injection} mut_rate={args.mutation_rate:.2f} "
+        f"cx_rate={args.crossover_rate:.2f} workers=8"
     )
 
     # Build seeded population for gen 0
