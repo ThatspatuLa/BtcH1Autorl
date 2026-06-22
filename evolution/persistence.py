@@ -33,12 +33,18 @@ class GenerationRecord:
     best_genome_id: str
     wall_time_seconds_used: float
     rejection_reasons: dict[str, int]       # reason → count
+    # Fix B (2026-06-22): elite-eligible count (passed + meets quality gate)
+    n_elite_eligible: int = 0
     # IDs of all evaluated candidates (so resume can skip them)
     evaluated_candidate_ids: list[str] = field(default_factory=list)
     # Top-N leaderboard by discovery_fitness (the "almost passing" diagnostic)
     leaderboard: list[dict[str, Any]] = field(default_factory=list)
     # Top-N by deployment_fitness (only deployment_pass=True candidates)
     deployment_leaderboard: list[dict[str, Any]] = field(default_factory=list)
+    # Per-island best fitness (Fix A, 2026-06-22): {island_id: best_fitness_this_gen}
+    per_island_best_fitness: dict[int, float] = field(default_factory=dict)
+    per_island_best_count: dict[int, int] = field(default_factory=dict)
+    per_island_elite_count: dict[int, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -53,6 +59,7 @@ class GenerationRecord:
             n_candidates=d["n_candidates"],
             n_rejected=d["n_rejected"],
             n_passed=d["n_passed"],
+            n_elite_eligible=d.get("n_elite_eligible", 0),
             n_deployment_passing=d.get("n_deployment_passing", 0),
             best_fitness=d["best_fitness"],
             median_fitness=d["median_fitness"],
@@ -63,6 +70,9 @@ class GenerationRecord:
             evaluated_candidate_ids=d.get("evaluated_candidate_ids", []),
             leaderboard=d.get("leaderboard", []),
             deployment_leaderboard=d.get("deployment_leaderboard", []),
+            per_island_best_fitness={int(k): float(v) for k, v in d.get("per_island_best_fitness", {}).items()},
+            per_island_best_count={int(k): int(v) for k, v in d.get("per_island_best_count", {}).items()},
+            per_island_elite_count={int(k): int(v) for k, v in d.get("per_island_elite_count", {}).items()},
         )
 
 

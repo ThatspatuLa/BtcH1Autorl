@@ -54,6 +54,13 @@ class EvolutionConfig:
     migrants_per_island: int = 4
     # Stagnation: if True, stagnation guard fires per-island (not globally)
     per_island_stagnation: bool = True
+    # Elite quality gate (Fix B, 2026-06-22): a candidate is "elite-eligible"
+    # only if consistency_ratio >= this OR discovery_fitness >= min_discovery_for_elite.
+    # Soft-passed candidates stay in the population for diversity but are not
+    # used as breeding seed. Prevents a single mediocre 0.28 candidate from
+    # becoming the seed of a 4-gen plateau.
+    min_consistency_for_elite: float = 0.50
+    min_discovery_for_elite: float = 0.70
 
     def __post_init__(self) -> None:
         if self.candidates_per_gen < 1:
@@ -109,6 +116,8 @@ class EvolutionConfig:
             "migration_every_n_gens": self.migration_every_n_gens,
             "migrants_per_island": self.migrants_per_island,
             "per_island_stagnation": self.per_island_stagnation,
+            "min_consistency_for_elite": self.min_consistency_for_elite,
+            "min_discovery_for_elite": self.min_discovery_for_elite,
         }
 
     @classmethod
@@ -134,4 +143,6 @@ class EvolutionConfig:
             migration_every_n_gens=d.get("migration_every_n_gens", 5),
             migrants_per_island=d.get("migrants_per_island", 4),
             per_island_stagnation=d.get("per_island_stagnation", True),
+            min_consistency_for_elite=d.get("min_consistency_for_elite", 0.50),
+            min_discovery_for_elite=d.get("min_discovery_for_elite", 0.70),
         )

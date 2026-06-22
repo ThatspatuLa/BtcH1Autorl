@@ -126,6 +126,72 @@ class EvolutionHarness:
             signal.signal(signal.SIGINT, handler)
 
     # ------------------------------------------------------------------
+    # Stagnation (Fix A, 2026-06-22)
+    # ------------------------------------------------------------------
+
+    def _check_stagnation(
+        self,
+        gen_record: GenerationRecord,
+        gen_idx: int,
+        last_improvement_gen: int,
+    ) -> bool:
+        """Check whether the run has stagnated. Returns True if so.
+
+        Behavior depends on config.per_island_stagnation:
+        - True (island mode): track per-island best fitness. Stagnation only
+          fires when ALL islands with at least one elite-eligible candidate
+          have failed to improve for stagnation_generations consecutive gens.
+        - False (single-pop): track global best fitness. Stagnation fires
+          after stagnation_generations consecutive gens with no global
+          improvement. (Original behavior — preserved for non-island runs.)
+        """
+        if not self.config.per_island_stagnation:
+            # Original global stagnation logic
+            gens_since_improvement = gen_idx - last_improvement_gen
+            return gens_since_improvement >= self.config.stagnation_generations
+
+        # Per-island stagnation
+        # 1. Read per-island best fitness from this gen's record (computed in
+        #    _run_generation by iterating candidates and reading their
+        #    lineage.island_assign tag).
+        per_island_best_this_gen = dict(gen_record.per_island_best_fitness or {})
+
+        # 2. Update per-island best-ever + per-island counter
+        for iid, fit in per_island_best_this_gen.items():
+            prev_best = self._island_best_fitness.get(iid, 0.0)
+            if fit > prev_best:
+                self._island_best_fitness[iid] = fit
+                self._island_stagnation_counter[iid] = 0
+            else:
+                self._island_stagnation_counter[iid] = (
+                    self._island_stagnation_counter.get(iid, 0) + 1
+                )
+
+        # 3. Only consider islands that had at least one elite-eligible
+        #    candidate this gen. Islands that produced 0 elites are being
+        #    re-seeded — they shouldn't count toward the stagnation trigger.
+        active_islands = [
+            iid for iid in per_island_best_this_gen.keys()
+            if (gen_record.per_island_elite_count or {}).get(iid, 0) > 0
+        ]
+        if not active_islands:
+            # Nobody produced an elite — that's a separate signal handled by
+            # the all-rejected check. Don't double-fire stagnation here.
+            return False
+
+        # 4. Stagnation fires only when ALL active islands have stagnated
+        #    for stagnation_generations consecutive gens. If even one island
+        #    is still improving, we keep going.
+        all_stagnant = all(
+            self._island_stagnation_counter.get(iid, 0) >= self.config.stagnation_generations
+            for iid in active_islands
+        )
+        return all_stagnant
+
+    # _per_island_best_from_record removed: per-island best fitness is now
+    # computed inline in _run_generation and stored on gen_record directly.
+
+    # ------------------------------------------------------------------
     # Main entry
     # ------------------------------------------------------------------
 
@@ -179,20 +245,22 @@ class EvolutionHarness:
                 gen_record = self._run_generation(gen_idx, history, rng, t_start)
                 history.generations.append(gen_record)
 
-                # Update best-ever
+                # Update best-ever (global)
                 if gen_record.best_fitness > history.best_fitness_ever:
                     history.best_fitness_ever = gen_record.best_fitness
                     history.best_genome_id_ever = gen_record.best_genome_id
                     history.best_candidate_id_ever = gen_record.best_candidate_id
                     last_improvement_gen = gen_idx
-                else:
-                    # Check stagnation
-                    gens_since_improvement = gen_idx - last_improvement_gen
-                    if gens_since_improvement >= self.config.stagnation_generations:
-                        termination_reason = "stagnation"
-                        if self.hooks.on_termination:
-                            self.hooks.on_termination(termination_reason, history)
-                        break
+
+                # Stagnation check (Fix A, 2026-06-22): per-island vs global
+                stagnation_hit = self._check_stagnation(
+                    gen_record, gen_idx, last_improvement_gen,
+                )
+                if stagnation_hit:
+                    termination_reason = "stagnation"
+                    if self.hooks.on_termination:
+                        self.hooks.on_termination(termination_reason, history)
+                    break
 
                 # Check all-rejected
                 if gen_record.n_passed == 0:
@@ -346,14 +414,26 @@ class EvolutionHarness:
                         self.hooks.on_candidate_evaluated(res)
 
         # 3) Sort + select. With the discovery/deployment split:
-        #    - "passed" = not hard-rejected (eligible for breeding, with non-zero
-        #      discovery_fitness; may still be sub-deployment).
-        #    - Breeding sort: by discovery_fitness descending.
+        #    - "passed" = not hard-rejected (eligible for diversity, may still
+        #      be sub-deployment).
+        #    - "elite_eligible" = subset of passed that also meets the
+        #      elite quality gate (Fix B, 2026-06-22): consistency >= min OR
+        #      discovery_fitness >= min. Prevents a 0.28-fitness candidate
+        #      from becoming the breeding seed for the next 4 gens.
+        #    - Breeding sort: by discovery_fitness descending (across elite_eligible).
         #    - Deployment sort: by deployment_fitness descending (only those
         #      with deployment_pass=True).
         passed = [r for r in results if not r.rejected]
-        passed.sort(key=lambda r: r.discovery_fitness, reverse=True)
-        elites = passed[:self.config.elite_count]
+        elite_eligible = [
+            r for r in passed
+            if r.consistency_ratio >= self.config.min_consistency_for_elite
+            or r.discovery_fitness >= self.config.min_discovery_for_elite
+        ]
+        # If no one qualifies as elite (all soft-passed), fall back to all-passed
+        # so we never produce an empty breeding pool.
+        breeding_pool = elite_eligible if elite_eligible else passed
+        breeding_pool.sort(key=lambda r: r.discovery_fitness, reverse=True)
+        elites = breeding_pool[:self.config.elite_count]
 
         # Top-N by discovery (the "almost passing" diagnostic)
         top_discovery = passed[:self.config.leaderboard_top_n]
@@ -403,6 +483,27 @@ class EvolutionHarness:
             }
             for i, r in enumerate(top_deployment)
         ]
+        # Per-island top-1 (Fix A, 2026-06-22): we know the island_id from the
+        # genome (tagged in lineage.mutation_ops at population build time).
+        # Build a {island_id: best_fitness} map by iterating passed candidates.
+        per_island_best_fitness: dict[int, float] = {}
+        per_island_best_count: dict[int, int] = {}
+        per_island_elite_count: dict[int, int] = {}
+        for r in passed:
+            # Find the genome in the candidates list to read island_id
+            cand = next((c for c in candidates if c.genome_id == r.genome_id), None)
+            if cand is None:
+                continue
+            iid = get_island_id_for_genome(cand)
+            # Skip island 0 (random bag) for stagnation tracking
+            if iid == 0:
+                continue
+            fit = r.discovery_fitness
+            if iid not in per_island_best_fitness or fit > per_island_best_fitness[iid]:
+                per_island_best_fitness[iid] = fit
+            per_island_best_count[iid] = per_island_best_count.get(iid, 0) + 1
+            if (r in elite_eligible):
+                per_island_elite_count[iid] = per_island_elite_count.get(iid, 0) + 1
         record = GenerationRecord(
             generation_index=gen_idx,
             started_at=gen_started,
@@ -410,6 +511,7 @@ class EvolutionHarness:
             n_candidates=len(results),
             n_rejected=len(results) - len(passed),
             n_passed=len(passed),
+            n_elite_eligible=len(elite_eligible),
             n_deployment_passing=len(deployment_passing),
             best_fitness=best.discovery_fitness if best else 0.0,
             median_fitness=median_fitness,
@@ -420,6 +522,9 @@ class EvolutionHarness:
             evaluated_candidate_ids=[r.candidate_id for r in results],
             leaderboard=leaderboard,
             deployment_leaderboard=deployment_leaderboard,
+            per_island_best_fitness=per_island_best_fitness,
+            per_island_best_count=per_island_best_count,
+            per_island_elite_count=per_island_elite_count,
         )
 
         # 5) Persist per-generation artifacts
