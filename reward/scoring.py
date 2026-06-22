@@ -305,8 +305,21 @@ def _compute_metrics(
 # ============================================================
 
 def compute_profit_normalizer(net_profit_pct: float) -> float:
-    """Sigmoid scaling centred at +50% profit. Below 0 = 0 (hard rejected anyway)."""
-    # Gentle sigmoid: 0 at -100% loss, ~0.5 at 0% profit, ~0.73 at +100%, ~0.88 at +300%
+    """Sigmoid scaling centred at 0% profit (k=1.5).
+
+    Reference points (verified by Phase A0.5 pinning tests):
+        -50%   → 0.32
+         0%   → 0.50 (centre of sigmoid)
+        +50%   → 0.68
+        +100%  → 0.82
+        +300%  → 0.99
+
+    Below 0% is penalised (returns a value < 0.5). The hard reject at
+    `net_profit_pct <= 0` is enforced separately by `_check_hard_rejects`,
+    not by this normaliser.
+    """
+    # Sigmoid centred at 0% (k=1.5): -50% → 0.32, 0% → 0.50, +50% → 0.68,
+    # +100% → 0.82, +300% → 0.99.
     return float(1.0 / (1.0 + math.exp(-net_profit_pct * 1.5)))
 
 
@@ -353,7 +366,21 @@ def compute_pf_normalizer(profit_factor: float) -> float:
 
 
 def compute_tpm_normalizer(tpm: float) -> float:
-    """Saturating curve: TPM 5 → ~0.3, TPM 20 → ~0.7, TPM 40+ → ~0.88."""
+    """Sigmoid centred at TPM=5 (k=1/8).
+
+    Reference points (verified by Phase A0.5 pinning tests):
+        TPM  0   → 0.35
+        TPM  5   → 0.50 (centre of sigmoid)
+        TPM 10   → 0.65
+        TPM 20   → 0.87
+        TPM 40+  → 0.99 (saturated)
+
+    The TPM<5 hard reject is enforced separately by `_check_hard_rejects`
+    (when `evolution_mode=False`) and `DEPLOYMENT_MIN_TRADES_PER_MONTH`
+    (when deploying). This normaliser only SCORES TPM — it does not gate.
+    """
+    # Sigmoid centred at TPM=5 (k=1/8): 0 → 0.35, 5 → 0.50, 10 → 0.65,
+    # 20 → 0.87, 40+ → 0.99.
     return float(1.0 / (1.0 + math.exp(-(tpm - 5.0) / 8.0)))
 
 

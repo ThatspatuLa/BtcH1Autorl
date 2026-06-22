@@ -485,3 +485,45 @@ def test_compute_metrics_recovered_curve_flags_true():
     metrics = _compute_metrics(eq, None)
     assert metrics["recovered_drawdown"] is True
     assert metrics["unrecovered_drawdown"] is False
+
+
+# ============================================================
+# PHASE A0.5 — Sigmoid pinning tests
+# ============================================================
+# Pins actual intended behaviour of profit + TPM normalisers. Prevents silent
+# regressions if the sigmoid is ever "fixed" to match the (wrong) docstrings.
+
+def test_profit_normalizer_known_values():
+    """Pin actual sigmoid output. Centred at 0% (k=1.5)."""
+    assert abs(compute_profit_normalizer(-0.50) - 0.3208) < 1e-3
+    assert abs(compute_profit_normalizer(0.00) - 0.5000) < 1e-3
+    assert abs(compute_profit_normalizer(0.50) - 0.6792) < 1e-3
+    assert abs(compute_profit_normalizer(1.00) - 0.8176) < 1e-3
+    assert abs(compute_profit_normalizer(3.00) - 0.9890) < 1e-3
+
+
+def test_tpm_normalizer_known_values():
+    """Pin actual sigmoid output. Centred at TPM=5 (k=1/8)."""
+    assert abs(compute_tpm_normalizer(0) - 0.3486) < 1e-3
+    assert abs(compute_tpm_normalizer(5) - 0.5000) < 1e-3
+    assert abs(compute_tpm_normalizer(10) - 0.6514) < 1e-3
+    assert abs(compute_tpm_normalizer(20) - 0.8670) < 1e-3
+    assert abs(compute_tpm_normalizer(40) - 0.9876) < 1e-3
+
+
+def test_sharpe_normalizer_known_values():
+    """Pin actual sigmoid output. Centred at Sharpe=0."""
+    # Sharper: at 0 → 0.5; at 1 → 0.7311; at 2 → 0.8808
+    assert abs(compute_sharpe_normalizer(0.0) - 0.5000) < 1e-3
+    assert abs(compute_sharpe_normalizer(1.0) - 0.7311) < 1e-3
+    assert abs(compute_sharpe_normalizer(2.0) - 0.8808) < 1e-3
+
+
+def test_pf_normalizer_known_values():
+    """Pin actual sigmoid output. Centred at PF=1."""
+    # PF=1.0 → 0.5; PF=2.0 → 0.7311; PF=3.0 → 0.8808; PF<=0 → 0
+    assert abs(compute_pf_normalizer(1.0) - 0.5000) < 1e-3
+    assert abs(compute_pf_normalizer(2.0) - 0.7311) < 1e-3
+    assert abs(compute_pf_normalizer(3.0) - 0.8808) < 1e-3
+    assert compute_pf_normalizer(0.0) == 0.0
+    assert compute_pf_normalizer(-1.0) == 0.0
