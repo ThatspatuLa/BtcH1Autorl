@@ -139,6 +139,52 @@ class RetiredIslandRecord:
 # Archive + restore
 # ============================================================
 
+def elite_signature(g: CandidateGenome) -> tuple:
+    """Build a dedup signature for a CandidateGenome based on its actual params.
+
+    Used to collapse clones that share fitness + params but differ only by
+    genome_id (e.g. migration copies, mutation re-seeds of the same lineage).
+    """
+    dca = g.dca_genome
+    grid = dca.grid_params or {}
+    alloc = dca.allocation_params or {}
+    tp = g.tp_genome.exit_params or {} if g.tp_genome else {}
+    return (
+        dca.grid_method.value if hasattr(dca.grid_method, "value") else str(dca.grid_method),
+        round(float(grid.get("pct", 0.0)), 6),
+        round(float(grid.get("drawdown_pct", 0.0)), 6),
+        round(float(grid.get("tp_pct", 0.0)), 6),
+        int(round(float(grid.get("max_layers", 0)))),
+        int(round(float(grid.get("cooldown_candles", 0)))),
+        dca.allocation_method.value if hasattr(dca.allocation_method, "value") else str(dca.allocation_method),
+        round(float(alloc.get("multiplier", 0.0)), 4),
+        round(float(alloc.get("max_layer_size_pct", 0.0)), 4),
+        tuple(sorted(c.value if hasattr(c, "value") else str(c)
+                     for c in (dca.confirmation_indicators or []))),
+        round(float(tp.get("tp_pct", 0.0)), 6),
+        dca.combo_method.value if hasattr(dca.combo_method, "value") else str(dca.combo_method),
+        dca.trigger_mode.value if hasattr(dca.trigger_mode, "value") else str(dca.trigger_mode),
+    )
+
+
+def dedup_elites_by_signature(
+    elites: list[tuple[CandidateGenome, float]],
+) -> list[tuple[CandidateGenome, float]]:
+    """Deduplicate elites by params signature, keeping the highest-fitness copy.
+
+    elites: [(genome, fitness), ...] — may contain clones that share params
+            but differ in genome_id (e.g. migration copies).
+    Returns: list sorted by fitness desc with one entry per unique signature.
+    """
+    seen: dict[tuple, tuple[CandidateGenome, float]] = {}
+    for g, f in elites:
+        sig = elite_signature(g)
+        prev = seen.get(sig)
+        if prev is None or f > prev[1]:
+            seen[sig] = (g, f)
+    return sorted(seen.values(), key=lambda x: x[1], reverse=True)
+
+
 def archive_island(
     policy: RetirementPolicy,
     cycle_id: str,
@@ -150,6 +196,7 @@ def archive_island(
     elites: list[tuple[CandidateGenome, float]],   # [(genome, fitness), ...]
     generations_evolved: int,
     per_island_history: list[dict[str, Any]] | None = None,
+    top_n: int = 3,
 ) -> RetiredIslandRecord:
     """Archive one island. Writes manifest + sidecar files. Returns the record.
 
@@ -158,6 +205,9 @@ def archive_island(
             manifest.json
             top_3_elites.json
             generation_history.json  (per-island slice)
+
+    Elites are deduplicated by params signature before taking the top-N, so
+    migration copies / re-seeded clones don't collapse the archive.
     """
     archive_root = Path(policy.archive_dir)
     archive_root.mkdir(parents=True, exist_ok=True)
@@ -167,9 +217,12 @@ def archive_island(
     island_dir = archive_root / dir_name
     island_dir.mkdir(parents=True, exist_ok=True)
 
-    # Sort elites by fitness desc
-    elites_sorted = sorted(elites, key=lambda x: x[1], reverse=True)
-    top_3 = elites_sorted[:3]
+    # DEDUP by params signature (not by genome_id) so migration copies of the
+    # same fit lineage don't collapse to N copies of one genome. This was the
+    # Bug #1 root cause — archive top-3 were 3x the same elite.
+    elites_dedup = dedup_elites_by_signature(elites)
+    elites_sorted = elites_dedup  # already sorted desc by fitness
+    top_3 = elites_sorted[:top_n]
 
     record = RetiredIslandRecord(
         island_id=island_id,
@@ -178,7 +231,7 @@ def archive_island(
         retired_at_timestamp=datetime.now().timestamp(),
         family_bias=family_bias,
         per_island_top_fitness=per_island_top_fitness,
-        n_elites_archived=len(elites_sorted),
+        n_elites_archived=len(elites_dedup),
         n_generations_evolved=generations_evolved,
         top_3_elite_ids=[g.genome_id for g, _ in top_3],
         top_3_elite_fitness=[round(f, 6) for _, f in top_3],

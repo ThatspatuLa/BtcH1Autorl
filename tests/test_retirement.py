@@ -43,25 +43,39 @@ from genome.schema import (
 # Test fixtures
 # ---------------------------------------------------------------
 
-def _make_genome(genome_id: str = "G_test") -> CandidateGenome:
-    """Build a minimal valid CandidateGenome for retirement tests."""
+def _make_genome(
+    genome_id: str = "G_test",
+    grid_method: GridMethod = GridMethod.FIXED_PCT,
+    grid_params: dict | None = None,
+    allocation_method: AllocationMethod = AllocationMethod.EQUAL,
+    tp_pct: float = 0.5,
+    confirmations: list | None = None,
+) -> CandidateGenome:
+    """Build a minimal valid CandidateGenome for retirement tests.
+
+    Default params match between calls — so two genomes with the same genome_id
+    but different default params will be flagged as duplicates by dedup.
+    Pass grid_params/grid_method/tp_pct to make a distinct genome.
+    """
+    if grid_params is None:
+        grid_params = {"grid_pct": 0.5, "max_layers": 6}
     return CandidateGenome(
         genome_id=genome_id,
         dca_genome=DcaGenome(
-            grid_method=GridMethod.FIXED_PCT,
-            grid_params={"grid_pct": 0.5, "max_layers": 6},
-            allocation_method=AllocationMethod.EQUAL,
+            grid_method=grid_method,
+            grid_params=grid_params,
+            allocation_method=allocation_method,
             allocation_params={"base_notional": 100.0, "allocation_cap_pct": 0.10},
             combo_method="weighted_average",
             combo_params={},
             trigger_mode="price_only",
-            confirmation_indicators=[],
+            confirmation_indicators=list(confirmations or []),
             indicator_params={},
             max_dca_layers=6,
         ),
         tp_genome=TpGenome(
             exit_method=TpExitMethod.FIXED,
-            exit_params={"tp_pct": 0.5},
+            exit_params={"tp_pct": tp_pct},
             sub_exits=[],
         ),
         safety_genome=SafetyGenome(),
@@ -164,8 +178,9 @@ class TestBiasPool:
 
 class TestArchiveIsland:
     def test_archive_creates_directory_and_manifest(self, tmp_archive_dir):
-        g1 = _make_genome("G_a1")
-        g2 = _make_genome("G_a2")
+        # Two DISTINCT genomes (different grid_pct) so dedup doesn't collapse them
+        g1 = _make_genome("G_a1", grid_params={"grid_pct": 0.5, "max_layers": 6})
+        g2 = _make_genome("G_a2", grid_params={"grid_pct": 0.8, "max_layers": 8})
         policy = RetirementPolicy(archive_dir=tmp_archive_dir)
 
         rec = archive_island(
@@ -448,12 +463,11 @@ class TestRetirementRoundTrip:
         import random
         rng = random.Random(20260622)
 
-        g1 = _make_genome("G_1")
-        g2 = _make_genome("G_2")
-
         policy = RetirementPolicy(enabled=True, threshold=0.80, archive_dir=tmp_archive_dir)
 
         # Archive 5 islands
+        g1 = _make_genome("G_1", grid_params={"grid_pct": 0.5, "max_layers": 6})
+        g2 = _make_genome("G_2", grid_params={"grid_pct": 0.8, "max_layers": 8})
         for i in range(5):
             fitness = 0.80 + i * 0.01
             archive_island(

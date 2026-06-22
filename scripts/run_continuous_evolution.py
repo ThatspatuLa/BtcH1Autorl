@@ -246,13 +246,60 @@ def main() -> int:
         release_lock()
 
 
+def resolve_output_dir(args_output_dir: str | None, ts: str) -> tuple[Path, bool]:
+    """Resolve the actual output directory for a run.
+
+    Behavior:
+      - If --output-dir is None: create runs/evo_continuous_<ts>/ and return it.
+      - If --output-dir is "runs" or ends with "/runs" (the cron convention):
+          create runs/evo_continuous_<ts>/ inside it, update runs/latest symlink,
+          and return that timestamped subdir.
+      - If --output-dir is any other path: use it as-is.
+
+    Returns:
+      (output_dir, created_subdir_bool)
+      created_subdir_bool=True means we created a timestamped subdir (so the
+      caller knows the dir is fresh per cycle).
+    """
+    if args_output_dir is None:
+        out = Path(f"runs/evo_continuous_{ts}")
+        out.mkdir(parents=True, exist_ok=True)
+        return out, True
+
+    requested = Path(args_output_dir)
+    # The cron convention: --output-dir runs (literal) or runs/ (trailing slash)
+    is_cron_runs = (
+        requested.name == "runs"
+        and (requested.parent == Path(".") or str(requested.parent) == "")
+    )
+
+    if is_cron_runs:
+        # Create a timestamped subdir so each cycle has its own output.
+        out = requested / f"evo_continuous_{ts}"
+        out.mkdir(parents=True, exist_ok=True)
+        # Update runs/latest -> this cycle (symlink for easy "what's running now").
+        latest_link = requested / "latest"
+        try:
+            if latest_link.is_symlink() or latest_link.exists():
+                latest_link.unlink()
+            latest_link.symlink_to(out.name)
+        except OSError:
+            # Symlinks can fail on some FS (e.g. CIF without privs); non-fatal.
+            pass
+        return out, True
+
+    # Custom output dir (e.g. runs/evo_continuous_<ts>) — use as-is.
+    requested.mkdir(parents=True, exist_ok=True)
+    return requested, False
+
+
 def _run_evolution(args: argparse.Namespace) -> int:
     """Run one evolution pass. Returns exit code."""
 
     # Timestamped output directory
     ts = time.strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(args.output_dir or f"runs/evo_continuous_{ts}")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir, _created_subdir = resolve_output_dir(args.output_dir, ts)
+    print(f"[evo] Output dir: {output_dir}")
 
     # Load data
     data_path = Path(args.data)
