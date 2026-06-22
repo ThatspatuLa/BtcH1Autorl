@@ -126,14 +126,31 @@ def main() -> int:
     parser.add_argument(
         "--max-generations",
         type=int,
-        default=20,
-        help="Max generations per run (default 20)",
+        default=40,
+        help="Max generations per run (default 40 for island mode)",
     )
     parser.add_argument(
         "--candidates",
         type=int,
         default=500,
         help="Candidates per generation (default 500)",
+    )
+    parser.add_argument(
+        "--island-mode",
+        action="store_true",
+        help="Use 8-island sub-population model (Plan B, default False)",
+    )
+    parser.add_argument(
+        "--n-islands",
+        type=int,
+        default=8,
+        help="Number of islands when --island-mode is on (default 8)",
+    )
+    parser.add_argument(
+        "--migration-every",
+        type=int,
+        default=5,
+        help="Migrate top-K between islands every N generations (default 5)",
     )
     parser.add_argument(
         "--elite-count",
@@ -164,6 +181,24 @@ def main() -> int:
         type=int,
         default=None,
         help="RNG seed (default: random)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Number of parallel evaluation workers (default 8)",
+    )
+    parser.add_argument(
+        "--stagnation-generations",
+        type=int,
+        default=5,
+        help="Stagnation guard: stop after N gens with no improvement (default 5)",
+    )
+    parser.add_argument(
+        "--all-rejected-generations",
+        type=int,
+        default=3,
+        help="All-rejected guard: stop after N gens of 0 passing (default 3)",
     )
     parser.add_argument(
         "--experiment-id",
@@ -227,23 +262,39 @@ def _run_evolution(args: argparse.Namespace) -> int:
         crossover_rate=args.crossover_rate,
         max_generations=args.max_generations,
         wall_time_seconds=args.wall_time_seconds,
-        stagnation_generations=5,
-        all_rejected_generations=3,
-        parallel_workers=8,
+        stagnation_generations=args.stagnation_generations,
+        all_rejected_generations=args.all_rejected_generations,
+        parallel_workers=args.workers,
+        base_seed=args.seed,
         output_dir=str(output_dir),
         experiment_id=args.experiment_id,
-        base_seed=seed,
+        leaderboard_top_n=20,
+        island_mode=args.island_mode,
+        n_islands=args.n_islands,
+        migration_every_n_gens=args.migration_every,
     )
-
     print(
         f"[evo] GA config: cands={args.candidates} elites={args.elite_count} "
         f"random={args.random_injection} mut_rate={args.mutation_rate:.2f} "
-        f"cx_rate={args.crossover_rate:.2f} workers=8"
+        f"cx_rate={args.crossover_rate:.2f} workers={args.workers} "
+        f"islands={args.n_islands if args.island_mode else 'off'}"
     )
 
     # Build seeded population for gen 0
     print(f"[evo] Building seeded population of {args.candidates}")
-    seeded_pop = build_population(rng, generation_index=0)
+    if args.island_mode:
+        from evolution.islands import get_island_specs
+        from evolution.population_builder import build_island_population
+        specs = get_island_specs()[:args.n_islands]
+        seeded_pop = build_island_population(
+            rng=rng,
+            generation_index=0,
+            island_specs=specs,
+            gid_start=0,
+            random_count=4,
+        )
+    else:
+        seeded_pop = build_population(rng, generation_index=0)
     print(f"[evo] Seeded population built: {len(seeded_pop)} candidates")
 
     # Population split report
