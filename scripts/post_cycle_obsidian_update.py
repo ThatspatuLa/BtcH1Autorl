@@ -83,12 +83,50 @@ def detect_all_time_best() -> float:
     return best
 
 
+def load_best_genome_v2_breakdown(cycle_dir: Path) -> dict[str, Any] | None:
+    """Load v2 component breakdown for the best candidate from the latest leaderboard.
+
+    Returns None if the cycle predates Phase D (pre-v2 — leaderboards lack the fields).
+    """
+    lb_dir = cycle_dir / "leaderboards"
+    if not lb_dir.exists():
+        return None
+    # Find the latest generation's leaderboard
+    candidates = sorted(lb_dir.glob("gen_*.json"), reverse=True)
+    for lb_path in candidates:
+        try:
+            lb = json.loads(lb_path.read_text())
+            entries = lb.get("leaderboard", [])
+            if not entries:
+                continue
+            top = entries[0]
+            # Check for v2 fields (Phase D onwards)
+            if "full_period_base_score" in top:
+                return {
+                    "generation": lb.get("generation_index", "?"),
+                    "candidate_id": top.get("candidate_id", "?"),
+                    "genome_id": top.get("genome_id", "?"),
+                    "discovery_fitness": top.get("discovery_fitness", 0),
+                    "full_period_base_score": top.get("full_period_base_score", 0),
+                    "recovery_score": top.get("recovery_score", 0),
+                    "stability_score": top.get("stability_score", 0),
+                    "concentration_score": top.get("concentration_score", 0),
+                    "recovery_breakdown": top.get("recovery_breakdown", {}),
+                }
+            # Pre-v2 cycle — no breakdown available
+            return None
+        except (json.JSONDecodeError, OSError):
+            continue
+    return None
+
+
 def render_cycle_section(
     cycle_id: str,
     fs: dict[str, Any],
     retired_this_cycle: int,
     retired_total: int,
     all_time_best: float,
+    v2_breakdown: dict[str, Any] | None = None,
 ) -> str:
     """Render the markdown section for one cycle (deterministic, minimal)."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -102,6 +140,36 @@ def render_cycle_section(
     deploy_total = fs.get("n_deployment_passing_total", 0)
     runtime = fs.get("total_runtime_seconds", 0.0)
     output_dir = Path(fs.get("output_dir", "")).name or "?"
+
+    # v2 breakdown block (Phase D) — only if available
+    v2_block = ""
+    if v2_breakdown is not None:
+        rb = v2_breakdown.get("recovery_breakdown", {})
+        rb_lines = []
+        for k, v in rb.items():
+            rb_lines.append(f"| {k} | {float(v):.4f} |")
+        rb_table = "\n".join(rb_lines) if rb_lines else "_(no sub-metrics)_"
+        v2_block = f"""
+### Fitness v2 breakdown (best candidate, gen {v2_breakdown.get("generation", "?")})
+
+| Component | Value |
+|---|---|
+| discovery_fitness (final) | **{float(v2_breakdown.get("discovery_fitness", 0)):.4f}** |
+| full_period_base_score (60%) | {float(v2_breakdown.get("full_period_base_score", 0)):.4f} |
+| recovery_score (20%) | {float(v2_breakdown.get("recovery_score", 0)):.4f} |
+| stability_score (5%) | {float(v2_breakdown.get("stability_score", 0)):.4f} |
+| concentration_score (5%) | {float(v2_breakdown.get("concentration_score", 0)):.4f} |
+
+#### Recovery sub-metrics
+
+| Sub-metric | Value |
+|---|---|
+{rb_table}
+
+Candidate: `{v2_breakdown.get("candidate_id", "?")}` · Genome: `{v2_breakdown.get("genome_id", "?")}`
+"""
+    else:
+        v2_block = "\n### Fitness v2 breakdown\n\n_(pre-Phase D cycle — no component breakdown available)_\n"
 
     return f"""## Cycle {cycle_id} — {ts}
 
@@ -119,7 +187,7 @@ def render_cycle_section(
 | Retired this cycle | {retired_this_cycle} |
 | **All-time best fitness** | **{all_time_best:.6f}** |
 | Total retired islands (archive) | {retired_total} |
-
+{v2_block}
 ---
 
 """
@@ -170,6 +238,7 @@ def post_cycle_to_obsidian(cycle_dir: Path, *, dry_run: bool = False) -> dict[st
     retired_total = count_retired_islands_total()
     retired_this_cycle = count_retired_this_cycle(cycle_id)
     all_time_best = detect_all_time_best()
+    v2_breakdown = load_best_genome_v2_breakdown(cycle_dir)
 
     new_section = render_cycle_section(
         cycle_id=cycle_id,
@@ -177,6 +246,7 @@ def post_cycle_to_obsidian(cycle_dir: Path, *, dry_run: bool = False) -> dict[st
         retired_this_cycle=retired_this_cycle,
         retired_total=retired_total,
         all_time_best=all_time_best,
+        v2_breakdown=v2_breakdown,
     )
 
     if not MINATO_RUN_NOTE.exists():

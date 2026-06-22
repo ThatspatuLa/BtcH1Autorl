@@ -197,6 +197,101 @@ class TestSectionRendering:
         # Has all the expected table cells
         assert "0.800000" in section
         assert "stagnation" in section
+        # v2 breakdown is absent (None by default) — falls back to placeholder
+        assert "Fitness v2 breakdown" in section
+        assert "pre-Phase D cycle" in section
+
+    def test_render_section_includes_v2_breakdown(self):
+        """When v2_breakdown is provided, render the full component table."""
+        fs = {
+            "termination_reason": "completed", "generations_completed": 10,
+            "generations_planned": 10, "total_candidates_evaluated": 5000,
+            "best_fitness_ever": 0.85, "best_genome_id_ever": "g1",
+            "best_candidate_id_ever": "c1", "n_deployment_passing_total": 100,
+            "total_runtime_seconds": 1800.0, "output_dir": "evo_continuous_TEST",
+        }
+        v2 = {
+            "generation": 9, "candidate_id": "c1", "genome_id": "g1",
+            "discovery_fitness": 0.85,
+            "full_period_base_score": 0.90,
+            "recovery_score": 0.70,
+            "stability_score": 0.80,
+            "concentration_score": 0.95,
+            "recovery_breakdown": {
+                "drawdown_recovery_speed": 0.65,
+                "post_loss_month_bounce_rate": 0.75,
+                "equity_high_reclaim_rate": 0.80,
+                "cycle_recovery_health": 0.60,
+            },
+        }
+        section = pco.render_cycle_section(
+            cycle_id="20260622_V2", fs=fs,
+            retired_this_cycle=0, retired_total=0, all_time_best=0.85,
+            v2_breakdown=v2,
+        )
+        # v2 header present
+        assert "Fitness v2 breakdown" in section
+        # All 5 component rows present
+        assert "0.8500" in section   # discovery_fitness
+        assert "0.9000" in section   # full_period_base_score
+        assert "0.7000" in section   # recovery_score
+        assert "0.8000" in section   # stability_score
+        assert "0.9500" in section   # concentration_score
+        # All 4 recovery sub-metrics present
+        assert "drawdown_recovery_speed" in section
+        assert "post_loss_month_bounce_rate" in section
+        assert "equity_high_reclaim_rate" in section
+        assert "cycle_recovery_health" in section
+        # Candidate + genome shown
+        assert "`c1`" in section
+        assert "`g1`" in section
+        # The pre-Phase D placeholder is NOT shown
+        assert "pre-Phase D cycle" not in section
+
+    def test_load_v2_breakdown_returns_none_for_pre_v2_leaderboards(self, tmp_path):
+        """Leaderboards without full_period_base_score field → returns None."""
+        # tmp_path/leaderboards/gen_0000.json with old-shape entry
+        lb_dir = tmp_path / "leaderboards"
+        lb_dir.mkdir()
+        lb = {
+            "generation_index": 0,
+            "leaderboard": [
+                {
+                    "candidate_id": "c1", "genome_id": "g1",
+                    "discovery_fitness": 0.8,  # OLD shape — no v2 fields
+                    "deployment_fitness": 0.8, "deployment_pass": True,
+                    "failed_deployment_gates": [], "consistency_ratio": 0.6,
+                }
+            ],
+        }
+        (lb_dir / "gen_0000.json").write_text(json.dumps(lb))
+        result = pco.load_best_genome_v2_breakdown(tmp_path)
+        assert result is None
+
+    def test_load_v2_breakdown_extracts_from_latest_generation(self, tmp_path):
+        """Finds the latest gen and extracts v2 fields if present."""
+        lb_dir = tmp_path / "leaderboards"
+        lb_dir.mkdir()
+        # gen 0: no top entry
+        (lb_dir / "gen_0000.json").write_text(json.dumps({"generation_index": 0, "leaderboard": []}))
+        # gen 1: v2 top entry
+        (lb_dir / "gen_0001.json").write_text(json.dumps({
+            "generation_index": 1,
+            "leaderboard": [{
+                "candidate_id": "c_late", "genome_id": "g_late",
+                "discovery_fitness": 0.85,
+                "full_period_base_score": 0.9,
+                "recovery_score": 0.7,
+                "stability_score": 0.8,
+                "concentration_score": 0.95,
+                "recovery_breakdown": {"drawdown_recovery_speed": 0.5},
+            }],
+        }))
+        result = pco.load_best_genome_v2_breakdown(tmp_path)
+        assert result is not None
+        assert result["candidate_id"] == "c_late"
+        assert result["full_period_base_score"] == 0.9
+        assert result["recovery_breakdown"]["drawdown_recovery_speed"] == 0.5
 
 
 class TestIdempotency:

@@ -25,8 +25,10 @@ class EvaluationResult:
     """Result of evaluating one candidate. The shape the harness consumes."""
     candidate_id: str
     genome_id: str
-    # Discovery fitness = base_aggregate × consistency_multiplier. Used for
-    # breeding selection by the GA. Range 0..1. NOT deployment-approved.
+    # Discovery fitness v2 = 0.60·full_period_base_score + 0.20·recovery_score
+    #                      + 0.10·consistency_score + 0.05·stability_score
+    #                      + 0.05·concentration_score. Used for breeding.
+    # Range 0..1. NOT deployment-approved.
     discovery_fitness: float
     # Deployment fitness: == discovery_fitness if every deployment gate passes,
     # else 0. Used for reporting and final acceptance.
@@ -36,6 +38,13 @@ class EvaluationResult:
     closest_to_passing_score: float
     consistency_ratio: float
     consistency_multiplier: float
+    # --- Phase D: v2 component scores (surfaced for leaderboards + reports) ---
+    full_period_base_score: float
+    recovery_score: float
+    stability_score: float
+    concentration_score: float
+    recovery_breakdown: dict[str, float]
+    # --- End Phase D ---
     # Whether this candidate is hard-rejected (safety). Soft-failing candidates
     # (consistency<0.50, low discovery_fitness) have rejected=False and a
     # non-zero discovery_fitness.
@@ -67,7 +76,14 @@ class EvaluationResult:
             "closest_to_passing_score": self.closest_to_passing_score,
             "consistency_ratio": self.consistency_ratio,
             "consistency_multiplier": self.consistency_multiplier,
-            "fitness": self.fitness,  # back-compat
+            # Phase D: v2 component scores
+            "full_period_base_score": self.full_period_base_score,
+            "recovery_score": self.recovery_score,
+            "stability_score": self.stability_score,
+            "concentration_score": self.concentration_score,
+            "recovery_breakdown": self.recovery_breakdown,
+            # Back-compat
+            "fitness": self.fitness,
             "rejected": self.rejected,
             "reject_reason": self.reject_reason,
             "rejection_source": self.rejection_source,
@@ -108,6 +124,11 @@ class CandidateEvaluator:
                 closest_to_passing_score=0.0,
                 consistency_ratio=0.0,
                 consistency_multiplier=0.0,
+                full_period_base_score=0.0,
+                recovery_score=0.0,
+                stability_score=0.0,
+                concentration_score=0.0,
+                recovery_breakdown={},
                 rejected=True,
                 reject_reason="evaluation_error",
                 rejection_source="evaluator",
@@ -173,6 +194,11 @@ def _evaluate_one(
             closest_to_passing_score=fitness.closest_to_passing_score,
             consistency_ratio=fitness.consistency_ratio,
             consistency_multiplier=fitness.consistency_multiplier,
+            full_period_base_score=fitness.full_period_base_score,
+            recovery_score=fitness.recovery_score,
+            stability_score=fitness.stability_score,
+            concentration_score=fitness.concentration_score,
+            recovery_breakdown=dict(fitness.recovery_breakdown),
             rejected=True,
             reject_reason=fitness.reject_reason or "unknown",
             rejection_source="monthly_fitness",
@@ -203,6 +229,11 @@ def _evaluate_one(
             closest_to_passing_score=fitness.closest_to_passing_score,
             consistency_ratio=fitness.consistency_ratio,
             consistency_multiplier=fitness.consistency_multiplier,
+            full_period_base_score=fitness.full_period_base_score,
+            recovery_score=fitness.recovery_score,
+            stability_score=fitness.stability_score,
+            concentration_score=fitness.concentration_score,
+            recovery_breakdown=dict(fitness.recovery_breakdown),
             rejected=True,
             reject_reason=score_result.reason,
             rejection_source="score",
@@ -225,6 +256,11 @@ def _evaluate_one(
         closest_to_passing_score=fitness.closest_to_passing_score,
         consistency_ratio=fitness.consistency_ratio,
         consistency_multiplier=fitness.consistency_multiplier,
+        full_period_base_score=fitness.full_period_base_score,
+        recovery_score=fitness.recovery_score,
+        stability_score=fitness.stability_score,
+        concentration_score=fitness.concentration_score,
+        recovery_breakdown=dict(fitness.recovery_breakdown),
         rejected=False,
         reject_reason=None,
         rejection_source=None,

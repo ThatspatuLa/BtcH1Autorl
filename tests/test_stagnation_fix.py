@@ -33,6 +33,17 @@ def _make_result(cand_id, disc_fit, cons_ratio, dep_pass=False, dep_fit=None):
         closest_to_passing_score=0.0,
         consistency_ratio=cons_ratio,
         consistency_multiplier=1.0,
+        # Phase D: v2 component scores (synthesised for the test)
+        full_period_base_score=disc_fit,
+        recovery_score=0.5,
+        stability_score=0.7,
+        concentration_score=0.8,
+        recovery_breakdown={
+            "drawdown_recovery_speed": 0.5,
+            "post_loss_month_bounce_rate": 0.5,
+            "equity_high_reclaim_rate": 0.5,
+            "cycle_recovery_health": 0.5,
+        },
         rejected=False,
         reject_reason=None,
         rejection_source=None,
