@@ -420,6 +420,22 @@ def _run_evolution(args: argparse.Namespace) -> int:
     print(f"[evo] Wrote final_status.json")
     print(f"[evo] Done. Status: {summary.termination_reason}")
 
+    # Post-cycle Obsidian sync (deterministic, idempotent).
+    # Skipped silently if the post_cycle_obsidian_update.py script isn't available.
+    try:
+        import subprocess
+        post_result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "post_cycle_obsidian_update.py"),
+             "--cycle-dir", str(output_dir)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if post_result.returncode == 0:
+            print(f"[evo] Obsidian post-cycle sync: OK")
+        else:
+            print(f"[evo] Obsidian post-cycle sync: SKIPPED (rc={post_result.returncode})")
+    except Exception as e:
+        print(f"[evo] Obsidian post-cycle sync: ERROR ({e})")
+
     return 0
 
 
