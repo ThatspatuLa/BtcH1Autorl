@@ -179,19 +179,23 @@ def _is_finite(v: float) -> bool:
 # Raw metric extraction
 # ============================================================
 
-def _compute_max_drawdown(equity_curve: pd.Series) -> tuple[float, float]:
-    """Return (max_drawdown_pct, recovery_time_candles).
+def _compute_max_drawdown(equity_curve: pd.Series) -> tuple[float, float, float, bool]:
+    """Return (max_drawdown_pct, recovery_time_candles, dd_event_duration_candles, recovered).
 
     max_drawdown_pct: peak-to-trough decline as positive fraction.
     recovery_time_candles: candles from peak to recovery (or len-1 if never recovered).
+    dd_event_duration_candles: length of the drawdown event itself (peak → trough → recovery,
+        or peak → end-of-curve if never recovered). NOT the entire curve length — that was the
+        Stage 5 measurement bug fixed in Phase A0.
+    recovered: True if the peak was reclaimed by end-of-curve.
     """
     if equity_curve.empty or len(equity_curve) < 2:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0, True
     running_max = equity_curve.cummax()
     drawdown = (running_max - equity_curve) / running_max
     max_dd = float(drawdown.max())
     if max_dd <= 0:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0, True
     # Position-based (not index-based) so we work with both DatetimeIndex and RangeIndex
     trough_pos = int(drawdown.values.argmax())
     peak_pos = int(running_max.iloc[:trough_pos + 1].values.argmax())
@@ -200,9 +204,16 @@ def _compute_max_drawdown(equity_curve: pd.Series) -> tuple[float, float]:
     if (after >= recovery_target).any():
         recovery_pos = int((after >= recovery_target).values.argmax())
         recovery_time = float(recovery_pos)
+        # Event duration = from peak → past trough → recovery
+        dd_event_duration = float(recovery_pos + (trough_pos - peak_pos))
+        recovered = True
     else:
+        # Never recovered: recovery_time = candles remaining in curve (semantic kept for back-compat)
+        # dd_event_duration = from peak → end of curve
         recovery_time = float(len(equity_curve) - 1)
-    return max_dd, recovery_time
+        dd_event_duration = float(len(equity_curve) - 1 - peak_pos)
+        recovered = False
+    return max_dd, recovery_time, dd_event_duration, recovered
 
 
 def _compute_metrics(
@@ -230,7 +241,7 @@ def _compute_metrics(
     initial = float(equity_curve.iloc[0])
     final = float(equity_curve.iloc[-1])
     net_pct = (final - initial) / initial if initial > 0 else 0.0
-    max_dd, recovery_time = _compute_max_drawdown(equity_curve)
+    max_dd, recovery_time, dd_event_duration, recovered = _compute_max_drawdown(equity_curve)
 
     # Trades metrics
     if trades_df is None or trades_df.empty:
@@ -283,7 +294,9 @@ def _compute_metrics(
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,
         "recovery_time_candles": recovery_time,
-        "dd_duration_candles": float(len(equity_curve)),  # approximation
+        "dd_duration_candles": dd_event_duration,  # event duration, not len(curve) — Phase A0 fix
+        "recovered_drawdown": recovered,            # Phase A0: surface for downstream consumers
+        "unrecovered_drawdown": not recovered,      # Phase A0: convenience flag
     }
 
 
@@ -301,14 +314,30 @@ def compute_dd_quality_normalizer(
     max_dd_pct: float,
     recovery_time_candles: float,
     dd_duration_candles: float,
+    unrecovered: bool = False,
 ) -> float:
-    """Higher = better. Lower DD + faster recovery = higher score."""
+    """Higher = better. Lower DD + faster recovery = higher score.
+
+    Phase A0 fix (Bug 1 + Bug 3):
+    - Bug 1: output is clamped to [0, 1] (defensive — negative max_dd no longer escapes).
+    - Bug 3: when `unrecovered=True` (drawdown never reclaimed), recovery_ratio is forced to 0.0
+      instead of ≈1.0 from the buggy len(curve) denominator.
+
+    Formula (unchanged for normal cases):
+        dd_score       = max(0, 1 - max_dd/0.35)
+        recovery_ratio = 0 if unrecovered else max(0, 1 - recovery_time/dd_duration)
+        result         = clamp(0.7*dd_score + 0.3*recovery_ratio, 0, 1)
+    """
     dd_score = max(0.0, 1.0 - max_dd_pct / 0.35)  # 0 DD → 1.0, 35% DD → 0.0
-    if dd_duration_candles <= 0:
-        recovery_ratio = 1.0
+    if unrecovered:
+        recovery_ratio = 0.0  # Bug 3 fix: never recovered → no recovery credit
+    elif dd_duration_candles <= 0:
+        recovery_ratio = 1.0  # edge case: caller passed 0 → assume instant recovery
     else:
         recovery_ratio = max(0.0, 1.0 - recovery_time_candles / dd_duration_candles)
-    return float(0.7 * dd_score + 0.3 * recovery_ratio)
+    raw = 0.7 * dd_score + 0.3 * recovery_ratio
+    # Bug 1 fix: defensive clamp to [0, 1]
+    return float(max(0.0, min(1.0, raw)))
 
 
 def compute_sharpe_normalizer(sharpe: float) -> float:
@@ -387,6 +416,7 @@ def compute_score(
             metrics["max_drawdown_pct"],
             metrics["recovery_time_candles"],
             metrics["dd_duration_candles"],
+            unrecovered=bool(metrics.get("unrecovered_drawdown", False)),  # Phase A0 Bug 3
         ),
         weight=REWARD_WEIGHTS["dd_quality"],
         contribution=0.0,

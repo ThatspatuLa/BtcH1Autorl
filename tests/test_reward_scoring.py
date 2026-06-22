@@ -58,6 +58,13 @@ def _steady_up_trades(n: int = 200) -> pd.DataFrame:
         "open_time": times,
         "close_time": times + pd.Timedelta(hours=4),
         "pnl": rng.uniform(50, 200, n),
+        "qty": rng.uniform(0.01, 0.1, n),
+        "avg_entry": rng.uniform(30000, 60000, n),
+        "exit_price": rng.uniform(30000, 60000, n),
+        "cycle_id": [f"c_{i}" for i in range(n)],
+        "symbol": ["BTC/USDT"] * n,
+        "n_layers": rng.randint(1, 5, n),
+        "close_reason": ["tp"] * n,
     })
 
 
@@ -383,3 +390,98 @@ def test_score_is_deterministic():
     assert isinstance(r1, ScoreResult) and isinstance(r2, ScoreResult)
     assert r1.breakdown.final_score == r2.breakdown.final_score
     assert r1.to_dict() == r2.to_dict()
+
+
+# ============================================================
+# PHASE A0 — Stage 5 bug-fix tests (Six's Gate Check finding)
+# ============================================================
+# Bug 1: dd_quality output not clamped to [0, 1]
+# Bug 2: dd_duration_candles = len(equity_curve) instead of event duration
+# Bug 3: unrecovered drawdowns get weak penalty
+# All three feed into Stage 5 base_score via compute_dd_quality_normalizer.
+
+from reward.scoring import _compute_max_drawdown, _compute_metrics
+
+
+def test_dd_quality_normalizer_clamps_negative_max_dd():
+    """Bug 1: dd_quality must be in [0, 1]. A negative max_dd_pct should not exceed 1.0."""
+    # With negative max_dd (impossible in practice but defensive), the inner dd_score would
+    # compute > 1.0 — outer clamp must bring it back. Output is clamped to 1.0.
+    out = compute_dd_quality_normalizer(
+        max_dd_pct=-0.05,
+        recovery_time_candles=50.0,
+        dd_duration_candles=200.0,
+    )
+    assert 0.0 <= out <= 1.0, f"dd_quality must be clamped to [0,1], got {out}"
+    # In-range case: realistic DD should still hit a sensible value
+    out2 = compute_dd_quality_normalizer(0.10, 50.0, 200.0)
+    assert 0.0 <= out2 <= 1.0
+    assert abs(out2 - (0.7 * (1.0 - 0.10 / 0.35) + 0.3 * 0.75)) < 1e-6  # 0.7250
+
+
+def test_dd_quality_normalizer_unrecovered_uses_zero_recovery_ratio():
+    """Bug 3: unrecovered drawdown must set recovery_ratio = 0, not ≈1.0."""
+    # 10% DD with dd_duration=100 and recovery_time=999 (never recovered)
+    out = compute_dd_quality_normalizer(
+        max_dd_pct=0.10,
+        recovery_time_candles=999.0,
+        dd_duration_candles=100.0,
+    )
+    # dd_score = max(0, 1 - 0.10/0.35) = 0.7143
+    # recovery_ratio = 0 (unrecovered → 0)
+    # out = 0.7 * 0.7143 + 0.3 * 0 = 0.5000
+    expected = 0.7 * (1.0 - 0.10 / 0.35) + 0.3 * 0.0
+    assert abs(out - expected) < 1e-6, f"expected {expected:.6f}, got {out:.6f}"
+
+
+def test_dd_quality_normalizer_recovered_uses_event_duration():
+    """Bug 2: dd_duration must reflect the drawdown event, not len(curve)."""
+    # 20% DD over an event lasting 80 candles, recovered in 40 candles within the event
+    out = compute_dd_quality_normalizer(
+        max_dd_pct=0.20,
+        recovery_time_candles=40.0,
+        dd_duration_candles=80.0,   # event duration, not len(curve)
+    )
+    # dd_score = max(0, 1 - 0.20/0.35) = 0.4286
+    # recovery_ratio = max(0, 1 - 40/80) = 0.5
+    # out = 0.7 * 0.4286 + 0.3 * 0.5 = 0.3000 + 0.1500 = 0.4500
+    expected = 0.7 * (1.0 - 0.20 / 0.35) + 0.3 * 0.5
+    assert abs(out - expected) < 1e-6, f"expected {expected:.6f}, got {out:.6f}"
+
+
+def test_compute_max_drawdown_returns_event_duration_and_recovered_flag():
+    """Bug 2/3: _compute_max_drawdown must return event_duration + recovered flag."""
+    # Synthetic 200-candle curve: flat 100 → drop to 90 over 50 candles → stays at 90
+    # dd_event_duration ≈ 100 candles (peak at 0 to end), recovered=False
+    idx = pd.date_range("2025-01-01", periods=200, freq="h")
+    eq = pd.Series([100.0] * 100 + [90.0] * 100, index=idx)
+    result = _compute_max_drawdown(eq)
+    # Bug 2 fix: result must be a 4-tuple including (max_dd, recovery_time, dd_event_duration, recovered)
+    assert len(result) == 4, f"expected 4-tuple, got {len(result)}-tuple: {result}"
+    max_dd, recovery_time, dd_event_duration, recovered = result
+    assert max_dd == pytest.approx(0.10, abs=1e-6)
+    # Bug 3: never recovered → recovered=False, recovery_time = len(curve) - 1
+    assert recovered is False
+    # Bug 2: dd_event_duration is from peak_pos to end (or to recovery)
+    # peak at idx 0, end at idx 199 → dd_event_duration = 199 - 0 = 199
+    assert dd_event_duration > 0
+
+
+def test_compute_metrics_exposes_recovered_drawdown_flag():
+    """Bug 3: metrics dict must expose recovered_drawdown / unrecovered_drawdown."""
+    idx = pd.date_range("2025-01-01", periods=100, freq="h")
+    eq = pd.Series([100.0] * 50 + [85.0] * 50, index=idx)  # 15% DD, never recovers
+    metrics = _compute_metrics(eq, None)
+    assert "recovered_drawdown" in metrics, "metrics must expose recovered_drawdown flag"
+    assert "unrecovered_drawdown" in metrics, "metrics must expose unrecovered_drawdown flag"
+    assert metrics["recovered_drawdown"] is False
+    assert metrics["unrecovered_drawdown"] is True
+
+
+def test_compute_metrics_recovered_curve_flags_true():
+    """Bug 3 control: a curve that recovers must flag recovered_drawdown=True."""
+    idx = pd.date_range("2025-01-01", periods=100, freq="h")
+    eq = pd.Series([100.0] * 50 + [85.0] * 30 + [100.0] * 20, index=idx)  # 15% DD, recovers at idx 80
+    metrics = _compute_metrics(eq, None)
+    assert metrics["recovered_drawdown"] is True
+    assert metrics["unrecovered_drawdown"] is False
