@@ -30,15 +30,26 @@ Stage 6.5 — Discovery vs Deployment:
 from __future__ import annotations
 
 import statistics
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import pandas as pd
 
-from fitness.deployment_gates import (
-    DEPLOYMENT_MIN_CONSISTENCY,
-    compute_deployment_gates,
-    consistency_multiplier,
+from dca_engine.tp_baseline import backtest_with_fixed_tp, extract_dca_params_from_genome
+from fitness.deployment_gates import DEPLOYMENT_MIN_CONSISTENCY, compute_deployment_gates, consistency_multiplier
+from fitness.discovery_fitness import (
+    DISCOVERY_WEIGHTS,
+    compute_concentration_score,
+    compute_discovery_fitness,
+    compute_stability_score,
+)
+from fitness.recovery_metrics import (
+    RECOVERY_WEIGHTS,
+    compute_cycle_recovery_health,
+    compute_drawdown_recovery_speed,
+    compute_equity_high_reclaim_rate,
+    compute_post_loss_month_bounce_rate,
+    compute_recovery_score,
 )
 from reward.scoring import RejectedResult, ScoreResult, compute_score
 
@@ -99,6 +110,10 @@ class MonthlyScore:
     reject_reason: str | None
     final_equity: float
     initial_equity: float
+    # Phase C: per-month recovery subscores. Currently empty dict (reserved
+    # for future per-month recovery reporting — global recovery_score is
+    # computed from the full equity curve in aggregate_monthly_fitness).
+    recovery_subscores: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -123,12 +138,34 @@ class MonthlyFitnessResult:
     stddev_monthly_score: float
     variance_penalty: float
     worst_floor_multiplier: float
-    # The pre-penalty walk-forward aggregate. Range 0..1. Used as the
-    # base for the consistency_multiplier in discovery_fitness.
+    # --- Stage 6.5 / Phase C Discovery Fitness v2 fields ---
+    # Old (deprecated by v2): base_aggregate_fitness. Kept for back-compat only
+    # with the value of the new discovery_fitness so old consumers see a number.
+    # Set to discovery_fitness in Phase C wiring.
     base_aggregate_fitness: float
-    # Discovery fitness = base_aggregate × consistency_multiplier (used by GA breeding)
+    # Discovery fitness v2 = 0.60·full_period_base_score + 0.20·recovery_score
+    #                      + 0.10·consistency_score + 0.05·stability_score
+    #                      + 0.05·concentration_score (see fitness/discovery_fitness.py)
     discovery_fitness: float
-    consistency_multiplier: float
+    consistency_multiplier: float   # kept for back-compat (= step function on consistency_ratio)
+    # --- Phase C new fields ---
+    # Stage 5 full-period base score (60% of discovery_fitness v2). Equals
+    # full_period_score when available, else median_monthly_score fallback.
+    full_period_base_score: float
+    # Recovery score (20% of discovery_fitness v2). Weighted sum of 4 sub-metrics
+    # from fitness/recovery_metrics.py.
+    recovery_score: float
+    # Stability score (5%). Light stddev/CoV penalty on monthly base scores.
+    stability_score: float
+    # Concentration score (5%). Penalty for one lucky month carrying the result.
+    concentration_score: float
+    # Recovery breakdown (per sub-metric) for diagnostics.
+    recovery_breakdown: dict[str, float]
+    # Per-month recovery subscores (lightweight — same dict shape as recovery_breakdown
+    # but per month). Currently only the global is populated; this is reserved for
+    # future per-month recovery reporting.
+    per_month_recovery: list[dict[str, float]]
+    # --- End Phase C new fields ---
     # Deployment fitness = discovery_fitness if deployment_pass, else 0
     deployment_fitness: float
     deployment_pass: bool
@@ -160,6 +197,14 @@ class MonthlyFitnessResult:
             "base_aggregate_fitness": self.base_aggregate_fitness,
             "discovery_fitness": self.discovery_fitness,
             "consistency_multiplier": self.consistency_multiplier,
+            # Phase C new fields
+            "full_period_base_score": self.full_period_base_score,
+            "recovery_score": self.recovery_score,
+            "stability_score": self.stability_score,
+            "concentration_score": self.concentration_score,
+            "recovery_breakdown": self.recovery_breakdown,
+            "per_month_recovery": self.per_month_recovery,
+            # Backwards compat
             "deployment_fitness": self.deployment_fitness,
             "deployment_pass": self.deployment_pass,
             "failed_deployment_gates": self.failed_deployment_gates,
@@ -380,11 +425,17 @@ def aggregate_monthly_fitness(
     experiment_slug: str = "unknown",
     full_period_score: float | None = None,
     full_period_rejected: bool = False,
+    equity_curve: pd.Series | None = None,
+    trades_df: pd.DataFrame | None = None,
 ) -> MonthlyFitnessResult:
     """Aggregate per-month scores into a single fitness.
 
-    Implements the locked v1 walk-forward aggregation rules plus Stage 6.5's
-    discovery vs deployment split.
+    Implements Discovery Fitness v2 (Phase C wiring):
+        discovery_fitness = 0.60·full_period_base_score
+                          + 0.20·recovery_score
+                          + 0.10·consistency_score
+                          + 0.05·stability_score
+                          + 0.05·concentration_score
 
     Hard rejects (rejected=True, fitness=0):
     - no_monthly_data
@@ -392,8 +443,13 @@ def aggregate_monthly_fitness(
     - worst_month below min_worst_month_score (genuine catastrophic)
     - median below min_median_score (genuine floor)
 
+    These run BEFORE the v2 aggregator runs. If a hard reject triggers,
+    all Phase C new fields are set to 0.0 and discovery_fitness=0.0.
+
     Soft penalty (NOT a hard reject):
-    - consistency below 0.50 — applies consistency_multiplier to discovery_fitness
+    - consistency below 0.50 — the deployment gate still fires (file
+      `fitness/deployment_gates.py` is untouched); the new aggregator's
+      `consistency_score` slot preserves the value for diagnostics.
     """
     n_months = len(monthly_scores)
     if n_months == 0:
@@ -413,6 +469,12 @@ def aggregate_monthly_fitness(
             base_aggregate_fitness=0.0,
             discovery_fitness=0.0,
             consistency_multiplier=0.0,
+            full_period_base_score=0.0,
+            recovery_score=0.0,
+            stability_score=0.0,
+            concentration_score=0.0,
+            recovery_breakdown={k: 0.0 for k in RECOVERY_WEIGHTS},
+            per_month_recovery=[],
             deployment_fitness=0.0,
             deployment_pass=False,
             failed_deployment_gates=["no_monthly_data"],
@@ -449,6 +511,12 @@ def aggregate_monthly_fitness(
             base_aggregate_fitness=0.0,
             discovery_fitness=0.0,
             consistency_multiplier=0.0,
+            full_period_base_score=0.0,
+            recovery_score=0.0,
+            stability_score=0.0,
+            concentration_score=0.0,
+            recovery_breakdown={k: 0.0 for k in RECOVERY_WEIGHTS},
+            per_month_recovery=[],
             deployment_fitness=0.0,
             deployment_pass=False,
             failed_deployment_gates=["all_months_rejected"],
@@ -466,20 +534,10 @@ def aggregate_monthly_fitness(
     floor_mult = _worst_floor_multiplier(worst_score)
     stddev_score = float(statistics.pstdev(valid_scores))
 
-    # Weighted aggregation (the pre-penalty base)
     weights = WALK_FORWARD_V1
-    base_aggregate_fitness = (
-        weights["median_weight"] * median_score
-        + weights["consistency_weight"] * consistency_ratio
-        + weights["variance_weight"] * var_pen
-        + weights["worst_floor_weight"] * floor_mult
-    )
 
-    # Stage 6.5: consistency is a soft penalty, not a hard reject
-    mult = consistency_multiplier(consistency_ratio)
-    discovery_fitness = base_aggregate_fitness * mult
-
-    # Hard rejection rules (consistency removed)
+    # ---------- Hard-reject gates (Phase C3.5: MUST run before v2 aggregator) ----------
+    # These short-circuit the v2 aggregator — rejected candidates get discovery_fitness=0.0.
     rejected = False
     reject_reason: str | None = None
     if worst_score < weights["min_worst_month_score"]:
@@ -490,38 +548,8 @@ def aggregate_monthly_fitness(
         reject_reason = f"median<{weights['min_median_score']:.2f}"
 
     if rejected:
-        # Hard-rejected: zero everything out (not eligible for breeding)
-        discovery_fitness = 0.0
-        deployment_fitness = 0.0
-        deployment_pass = False
-        failed_gates: list[str] = [reject_reason] if reject_reason else []
-        closest = 0.0
-    else:
-        # Compute deployment picture (uses full_period_score for DD/TPM if available)
-        # Worst_month over months is a proxy for max DD — use it as DD signal
-        # (conservative: monthly worst is always <= period worst, but here we
-        # don't have the period max DD on this struct; pass -1 so the gate
-        # only fires on consistency / volume)
-        max_dd_proxy = -1.0
-        total_trades = sum(m.total_trades for m in monthly_scores)
-        months_active = float(n_months)
-        tpm_proxy = (total_trades / months_active) if months_active > 0 else 0.0
-        gate = compute_deployment_gates(
-            consistency_ratio=consistency_ratio,
-            max_drawdown_pct=max_dd_proxy,
-            trades_per_month=tpm_proxy,
-            total_trades=total_trades,
-            has_invalid_equity=False,
-            has_margin_failure=False,
-            has_dca_completion_failure=False,
-            base_aggregate_fitness=base_aggregate_fitness,
-        )
-        deployment_fitness = gate.deployment_fitness
-        deployment_pass = gate.deployment_pass
-        failed_gates = gate.failed_deployment_gates
-        closest = gate.closest_to_passing_score
-        # final_fitness is discovery (kept as back-compat alias)
-        final_fitness = discovery_fitness
+        # Hard-rejected: zero everything out (not eligible for breeding).
+        # Phase C new fields all 0.0; aggregator never sees this candidate.
         return MonthlyFitnessResult(
             candidate_id=candidate_id,
             experiment_slug=experiment_slug,
@@ -535,21 +563,104 @@ def aggregate_monthly_fitness(
             stddev_monthly_score=stddev_score,
             variance_penalty=var_pen,
             worst_floor_multiplier=floor_mult,
-            base_aggregate_fitness=base_aggregate_fitness,
-            discovery_fitness=discovery_fitness,
-            consistency_multiplier=mult,
-            deployment_fitness=deployment_fitness,
-            deployment_pass=deployment_pass,
-            failed_deployment_gates=failed_gates,
-            closest_to_passing_score=closest,
-            final_fitness=final_fitness,
-            rejected=False,
-            reject_reason=None,
+            base_aggregate_fitness=0.0,   # Phase C: back-compat alias for new value
+            discovery_fitness=0.0,
+            consistency_multiplier=consistency_multiplier(consistency_ratio),
+            full_period_base_score=0.0,
+            recovery_score=0.0,
+            stability_score=0.0,
+            concentration_score=0.0,
+            recovery_breakdown={k: 0.0 for k in RECOVERY_WEIGHTS},
+            per_month_recovery=[],
+            deployment_fitness=0.0,
+            deployment_pass=False,
+            failed_deployment_gates=[reject_reason] if reject_reason else [],
+            closest_to_passing_score=0.0,
+            final_fitness=0.0,
+            rejected=rejected,
+            reject_reason=reject_reason,
             full_period_score=full_period_score,
             full_period_rejected=full_period_rejected,
         )
 
-    # Hard-rejected path
+    # ---------- Phase C: Discovery Fitness v2 aggregator ----------
+    # Compute the 5 components. All in [0, 1].
+    # 1. full_period_base_score: Stage 5 final_score on full 5y equity.
+    #    Fallback: median_monthly_score if full-period was rejected (shouldn't happen
+    #    here since hard rejects already returned, but defensive).
+    fpbs = float(full_period_score) if (full_period_score is not None and not full_period_rejected) else median_score
+
+    # 2. recovery_score: weighted sum of 4 sub-metrics from fitness/recovery_metrics.py.
+    if equity_curve is not None and not equity_curve.empty:
+        recovery_subs = {
+            "drawdown_recovery_speed": compute_drawdown_recovery_speed(equity_curve),
+            "post_loss_month_bounce_rate": compute_post_loss_month_bounce_rate(
+                [m.net_profit_pct > 0 for m in monthly_scores]
+            ),
+            "equity_high_reclaim_rate": compute_equity_high_reclaim_rate(equity_curve),
+            "cycle_recovery_health": compute_cycle_recovery_health(trades_df),
+        }
+    else:
+        # No equity curve → use month-level proxies
+        recovery_subs = {
+            "drawdown_recovery_speed": consistency_ratio,  # proxy
+            "post_loss_month_bounce_rate": compute_post_loss_month_bounce_rate(
+                [m.net_profit_pct > 0 for m in monthly_scores]
+            ),
+            "equity_high_reclaim_rate": consistency_ratio,  # proxy
+            "cycle_recovery_health": compute_cycle_recovery_health(trades_df),
+        }
+    recovery_score_val = compute_recovery_score(**recovery_subs)
+
+    # 3. consistency_score = consistency_ratio (profitable_months / total_months)
+    consistency_score_val = consistency_ratio
+
+    # 4. stability_score = light stddev penalty on monthly base scores
+    stability_score_val = compute_stability_score(valid_scores)
+
+    # 5. concentration_score = penalty for one lucky month
+    monthly_profits = [m.net_profit_pct for m in monthly_scores if not m.rejected]
+    concentration_score_val = compute_concentration_score(monthly_profits)
+
+    # ---------- The new discovery_fitness v2 ----------
+    discovery_fitness = compute_discovery_fitness(
+        full_period_base_score=fpbs,
+        recovery_score=recovery_score_val,
+        consistency_score=consistency_score_val,
+        stability_score=stability_score_val,
+        concentration_score=concentration_score_val,
+    )
+
+    # Back-compat: keep `base_aggregate_fitness` field, but populate it with the
+    # new value (the old walk-forward blend is superseded). Old consumers reading
+    # `base_aggregate_fitness` will see the new discovery_fitness, which is a
+    # superset of the information.
+    base_aggregate_fitness = discovery_fitness
+
+    # consistency_multiplier is kept for back-compat (Stage 6.5 consistency penalty curve).
+    mult = consistency_multiplier(consistency_ratio)
+
+    # Deployment picture (untouched code from v1)
+    max_dd_proxy = -1.0
+    total_trades = sum(m.total_trades for m in monthly_scores)
+    months_active = float(n_months)
+    tpm_proxy = (total_trades / months_active) if months_active > 0 else 0.0
+    gate = compute_deployment_gates(
+        consistency_ratio=consistency_ratio,
+        max_drawdown_pct=max_dd_proxy,
+        trades_per_month=tpm_proxy,
+        total_trades=total_trades,
+        has_invalid_equity=False,
+        has_margin_failure=False,
+        has_dca_completion_failure=False,
+        base_aggregate_fitness=base_aggregate_fitness,
+    )
+    deployment_fitness = gate.deployment_fitness
+    deployment_pass = gate.deployment_pass
+    failed_gates = gate.failed_deployment_gates
+    closest = gate.closest_to_passing_score
+    final_fitness = discovery_fitness
+
     return MonthlyFitnessResult(
         candidate_id=candidate_id,
         experiment_slug=experiment_slug,
@@ -564,15 +675,21 @@ def aggregate_monthly_fitness(
         variance_penalty=var_pen,
         worst_floor_multiplier=floor_mult,
         base_aggregate_fitness=base_aggregate_fitness,
-        discovery_fitness=0.0,
+        discovery_fitness=discovery_fitness,
         consistency_multiplier=mult,
-        deployment_fitness=0.0,
-        deployment_pass=False,
+        full_period_base_score=fpbs,
+        recovery_score=recovery_score_val,
+        stability_score=stability_score_val,
+        concentration_score=concentration_score_val,
+        recovery_breakdown=recovery_subs,
+        per_month_recovery=[],   # reserved for future per-month reporting
+        deployment_fitness=deployment_fitness,
+        deployment_pass=deployment_pass,
         failed_deployment_gates=failed_gates,
         closest_to_passing_score=closest,
-        final_fitness=0.0,
-        rejected=rejected,
-        reject_reason=reject_reason,
+        final_fitness=final_fitness,
+        rejected=False,
+        reject_reason=None,
         full_period_score=full_period_score,
         full_period_rejected=full_period_rejected,
     )
@@ -640,4 +757,6 @@ def compute_monthly_fitness(
         experiment_slug=experiment_slug,
         full_period_score=full_score,
         full_period_rejected=full_rej,
+        equity_curve=equity_curve,
+        trades_df=trades_df,
     )
