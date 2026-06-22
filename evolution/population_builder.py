@@ -419,3 +419,151 @@ def build_population(
     population = exploit + explore + hybrid + rand
     assert len(population) == 500, f"Expected 500, got {len(population)}"
     return population
+
+
+# ============================================================
+# Island-mode population (Plan B, effective 2026-06-22)
+# ============================================================
+#
+# 8 islands × 62 candidates = 496, plus 4 random = 500 total.
+# Each island forces a structural bias (grid method, allocation, layer cap)
+# so it evolves a distinct niche. The harness routes candidates to islands
+# by genome_id, then per-island elites + migration every 5 gens.
+
+def _seed_island(
+    rng: random.Random,
+    generation_index: int,
+    gid_start: int,
+    n: int,
+    island_spec,  # evolution.islands.IslandSpec — avoid circular import
+    base_pct: float | None = None,
+) -> list[CandidateGenome]:
+    """Build n candidates biased by island_spec's forced fields."""
+    from evolution.islands import IslandSpec  # local import to avoid circular
+
+    candidates: list[CandidateGenome] = []
+    gid = gid_start
+
+    for _ in range(n):
+        # Grid method
+        if island_spec.forced_grid_methods is not None:
+            gm = rng.choice(island_spec.forced_grid_methods)
+        else:
+            gm = rng.choice(ALL_GRID_METHODS)
+
+        gp = _build_grid_params(rng, gm, base_pct=base_pct)
+
+        # Max layers (apply cap if set)
+        ml = _random_layers(rng)
+        if island_spec.max_dca_layers_cap is not None:
+            ml = min(ml, island_spec.max_dca_layers_cap)
+
+        tp = _random_tp(rng)
+        cd = _random_cooldown(rng)
+
+        # Allocation method
+        if island_spec.forced_allocation is not None:
+            am = island_spec.forced_allocation
+            ap = _build_allocation_params(rng, am)
+        else:
+            am, ap = _pick_allocation(rng)
+
+        # Confirmations: if forced, use that; otherwise random
+        if island_spec.forced_confirmations is not None:
+            required = [island_spec.forced_confirmations[rng.randint(0, len(island_spec.forced_confirmations) - 1)]]
+            inds, ip = _pick_confirmations(rng, required=required)
+        else:
+            # No forced confirmations — 40% no confirmations, 60% one random
+            r = rng.random()
+            if r < 0.40:
+                inds, ip = [], {}
+            else:
+                inds, ip = _pick_confirmations(rng, required=None, max_indicators=2)
+
+        c = _make_candidate(
+            rng, generation_index, gid, gm, gp, tp, ml, cd, am, ap, inds, ip,
+        )
+        # Tag island_id into lineage.mutation_ops so it's accessible during eval
+        c.lineage.mutation_ops = list(c.lineage.mutation_ops) + [{
+            "op": "island_assign", "island_id": island_spec.island_id,
+        }]
+        candidates.append(c)
+        gid += 1
+
+    return candidates
+
+
+def _build_allocation_params(
+    rng: random.Random,
+    method: AllocationMethod,
+) -> dict[str, float]:
+    """Build allocation params for the given method."""
+    if method == AllocationMethod.EQUAL:
+        return {}
+    if method == AllocationMethod.LINEAR_INCREASING:
+        return {"increment_pct": rng.uniform(0.05, 0.5)}
+    if method == AllocationMethod.CONTROLLED_EXP:
+        return {
+            "multiplier": rng.uniform(1.2, 3.0),
+            "max_layer_size_pct": rng.uniform(2.0, 10.0),
+        }
+    if method == AllocationMethod.DRAWDOWN_ADJUSTED:
+        return {
+            "sensitivity": rng.uniform(1.0, 5.0),
+            "min_size_pct": rng.uniform(0.3, 1.0),
+            "max_size_pct": rng.uniform(2.0, 10.0),
+        }
+    if method == AllocationMethod.VOLATILITY_ADJUSTED:
+        return {
+            "reference_vol": rng.uniform(0.01, 0.05),
+            "min_size_pct": rng.uniform(0.3, 1.0),
+            "max_size_pct": rng.uniform(2.0, 5.0),
+        }
+    return {}
+
+
+def build_island_population(
+    rng: random.Random,
+    generation_index: int,
+    island_specs,  # list[IslandSpec]
+    gid_start: int = 0,
+    random_count: int = 4,
+) -> list[CandidateGenome]:
+    """Build a 500-candidate population partitioned across islands.
+
+    Each island gets its forced biases applied. Final `random_count`
+    candidates are pure-random (assigned to island 0 by the harness).
+    Each candidate is tagged with its island_id via lineage.mutation_ops
+    so it's accessible during eval (no separate tracker needed).
+    """
+    candidates: list[CandidateGenome] = []
+    gid = gid_start
+
+    for spec in island_specs:
+        candidates.extend(_seed_island(rng, generation_index, gid, spec.n_candidates, spec))
+        gid += spec.n_candidates
+
+    # Pure-random tail (island 0)
+    for _ in range(random_count):
+        from evolution.operators import random_candidate_genome as _rcg
+        c = _rcg(rng=rng, genome_id=_make_genome_id(generation_index, gid), generation_index=generation_index)
+        # Ensure cooldown is set
+        c.dca_genome.grid_params["cooldown_candles"] = _random_cooldown(rng)
+        c.lineage.mutation_ops = list(c.lineage.mutation_ops) + [{
+            "op": "island_assign", "island_id": 0,
+        }]
+        candidates.append(c)
+        gid += 1
+
+    return candidates
+
+
+def get_island_id_for_genome(genome: CandidateGenome) -> int:
+    """Read island_id from a genome's lineage.mutation_ops.
+
+    Returns 0 if no island_assign tag is found (defaults to "random" island).
+    """
+    for op in reversed(genome.lineage.mutation_ops or []):
+        if isinstance(op, dict) and op.get("op") == "island_assign":
+            return int(op.get("island_id", 0))
+    return 0

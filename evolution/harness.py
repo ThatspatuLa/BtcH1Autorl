@@ -34,6 +34,11 @@ import pandas as pd
 
 from evolution.config import EvolutionConfig
 from evolution.evaluator import CandidateEvaluator, EvaluationResult, _evaluate_one
+from evolution.islands import (
+    distribute_migrants,
+    get_island_specs,
+    select_migrants,
+)
 from evolution.operators import crossover, mutate, random_candidate_genome
 from evolution.persistence import (
     GenerationHistory,
@@ -47,7 +52,32 @@ from evolution.persistence import (
     save_state,
     save_unfinished_status,
 )
+from evolution.population_builder import (
+    build_island_population,
+    build_population,
+    get_island_id_for_genome,
+)
 from genome.schema import CandidateGenome
+
+
+def _seed_island_via_spec(
+    rng: random.Random,
+    generation_index: int,
+    spec,
+    count: int,
+) -> list[CandidateGenome]:
+    """Module-level helper: seed N candidates biased by island_spec.
+
+    Used when an island has no elites (e.g. first gen or all-rejected prior gen).
+    Delegates to population_builder.build_island_population for consistency.
+    """
+    return build_island_population(
+        rng=rng,
+        generation_index=generation_index,
+        island_specs=[spec],
+        gid_start=0,
+        random_count=0,
+    )[:count]
 
 
 @dataclass
@@ -77,6 +107,15 @@ class EvolutionHarness:
         self._seeded_population = seeded_population
         self._rng = rng or random.Random()
         self._setup_signal_handler()
+        # Island-mode state (Plan B, effective 2026-06-22)
+        # {island_id: best_fitness_so_far} for per-island stagnation tracking
+        self._island_best_fitness: dict[int, float] = {}
+        # {island_id: gens_since_improvement} for per-island stagnation guard
+        self._island_stagnation_counter: dict[int, int] = {}
+        # Last migration generation (for migration_every_n_gens)
+        self._last_migration_gen: int = -1
+        # Incoming migrants from last migration step
+        self._incoming_migrants: dict[int, list[CandidateGenome]] = {}
 
     def _setup_signal_handler(self) -> None:
         """SIGINT (Ctrl+C) saves state and exits cleanly."""
@@ -406,9 +445,27 @@ class EvolutionHarness:
         rng: random.Random,
         gen_idx: int,
     ) -> list[CandidateGenome]:
-        """Gen 0: use seeded population if provided, else all-random."""
+        """Gen 0: use seeded population if provided, else all-random.
+
+        Island mode: if seeded_population is provided AND island_mode is on,
+        partition the seeded pop across islands using build_island_population.
+        Otherwise (island_mode with no seeded pop, or single-pop mode),
+        fall through to the original path.
+        """
         if self._seeded_population is not None:
             return self._seeded_population
+
+        if self.config.island_mode:
+            specs = get_island_specs()[:self.config.n_islands]
+            return build_island_population(
+                rng=rng,
+                generation_index=gen_idx,
+                island_specs=specs,
+                gid_start=0,
+                random_count=4,
+            )
+
+        # Single-population fallback (original behavior)
         return [
             random_candidate_genome(
                 rng=rng,
@@ -426,12 +483,23 @@ class EvolutionHarness:
     ) -> list[CandidateGenome]:
         """Build next gen from elites + crossover + mutation + random injection.
 
+        Island mode: each island's elites breed among themselves (with migrants
+        from neighbors received in the last migration step). Random injection
+        stays per-island for diversity.
+
         If there are no elites (all-rejected prior gen), fall back to fully
         random — we still produce candidates_per_gen of them.
         """
         prev_gen = history.generations[-1]
-        elite_genomes = self._load_elite_genomes(prev_gen, gen_idx, rng)
         target = self.config.candidates_per_gen
+
+        # Island mode branch
+        if self.config.island_mode:
+            return self._generate_next_gen_island(
+                prev_gen, gen_idx, rng, target,
+            )
+
+        elite_genomes = self._load_elite_genomes(prev_gen, gen_idx, rng)
 
         # No elites → all random
         if not elite_genomes:
@@ -476,6 +544,200 @@ class EvolutionHarness:
             )
 
         return children[:target]
+
+    # ------------------------------------------------------------------
+    # Island mode — per-island breeding + migration
+    # ------------------------------------------------------------------
+
+    def _generate_next_gen_island(
+        self,
+        prev_gen: GenerationRecord,
+        gen_idx: int,
+        rng: random.Random,
+        target: int,
+    ) -> list[CandidateGenome]:
+        """Breed each island independently from its own elites + migrants.
+
+        Island allocation per generation:
+          - 3 elites (carried over, may include migrants from last migration)
+          - crossover_children + mutation_children (per-island)
+          - random_injection (per-island, fresh DNA)
+
+        Total target = sum across all islands = candidates_per_gen.
+        """
+        specs = get_island_specs()[:self.config.n_islands]
+
+        # 1. Migration step (every migration_every_n_gens generations)
+        if (
+            gen_idx > 0
+            and gen_idx - self._last_migration_gen >= self.config.migration_every_n_gens
+        ):
+            self._do_migration(prev_gen, gen_idx, rng)
+
+        # 2. Load per-island elites from previous generation's leaderboard
+        per_island_elite_genomes = self._load_per_island_elites(prev_gen, gen_idx)
+
+        # 3. Breed each island
+        all_children: list[CandidateGenome] = []
+        for spec in specs:
+            elites = per_island_elite_genomes.get(spec.island_id, [])
+            if not elites:
+                # No elites for this island — fall back to seeding new random
+                # biased by island spec via build_island_population's helper
+                all_children.extend(_seed_island_via_spec(rng, gen_idx, spec, count=spec.n_candidates))
+                continue
+
+            n_iso_total = spec.n_candidates
+            n_iso_random = max(2, int(n_iso_total * (self.config.random_injection / self.config.candidates_per_gen)))
+            n_iso_crossover = int((n_iso_total - n_iso_random) * self.config.crossover_rate)
+            n_iso_mutation = (n_iso_total - n_iso_random) - n_iso_crossover
+
+            island_children: list[CandidateGenome] = []
+
+            # Crossover
+            for _ in range(n_iso_crossover):
+                if len(elites) < 2:
+                    island_children.append(mutate(elites[0], rng=rng, mutation_rate=self.config.mutation_rate))
+                    continue
+                a = rng.choice(elites)
+                b = rng.choice(elites)
+                island_children.append(crossover(a, b, rng=rng))
+
+            # Mutation
+            for _ in range(n_iso_mutation):
+                parent = rng.choice(elites)
+                island_children.append(mutate(parent, rng=rng, mutation_rate=self.config.mutation_rate))
+
+            # Random injection (per-island fresh random)
+            for _ in range(n_iso_random):
+                island_children.append(
+                    random_candidate_genome(rng=rng, generation_index=gen_idx, tp_pct=self.config.tp_pct)
+                )
+
+            # Track island assignment for these new candidates
+            for c in island_children:
+                c.lineage.mutation_ops = list(c.lineage.mutation_ops) + [{
+                    "op": "island_assign", "island_id": spec.island_id,
+                }]
+
+            all_children.extend(island_children)
+
+        # Pure-random bag (island 0)
+        n_random_bag = max(0, target - len(all_children))
+        for _ in range(n_random_bag):
+            c = random_candidate_genome(rng=rng, generation_index=gen_idx, tp_pct=self.config.tp_pct)
+            c.lineage.mutation_ops = list(c.lineage.mutation_ops) + [{
+                "op": "island_assign", "island_id": 0,
+            }]
+            all_children.append(c)
+
+        return all_children[:target]
+
+    def _do_migration(
+        self,
+        prev_gen: GenerationRecord,
+        gen_idx: int,
+        rng: random.Random,
+    ) -> None:
+        """Migrate top-K elites from each island to its two neighbors.
+
+        Stores migrants as `self._incoming_migrants: {island_id: [genome]}`
+        so `_generate_next_gen_island` can fold them into the next gen's
+        elites.
+        """
+        per_island_elite_genomes = self._load_per_island_elites(prev_gen, gen_idx)
+
+        migrants_by_source: dict[int, list[CandidateGenome]] = {}
+        for iid, elites in per_island_elite_genomes.items():
+            if not elites:
+                continue
+            top_n = select_migrants(
+                iid, elites, n_migrants=self.config.migrants_per_island, rng=rng,
+            )
+            if top_n:
+                migrants_by_source[iid] = top_n
+
+        received = distribute_migrants(
+            migrants_by_source=migrants_by_source,
+            n_islands=self.config.n_islands,
+            rng=rng,
+        )
+
+        self._incoming_migrants = received
+        self._last_migration_gen = gen_idx
+
+    def _load_per_island_elites(
+        self,
+        prev_gen: GenerationRecord,
+        gen_idx: int,
+    ) -> dict[int, list[CandidateGenome]]:
+        """Load per-island elites for breeding.
+
+        Currently reads the previous gen's best_genome (single-pop legacy)
+        and uses it as the seed for every island. Migrants from the last
+        migration step are added on top. Future Stage 14 work: persist
+        per-island best_genome files so each island can breed from its
+        own actual #1.
+        """
+        out_dir = Path(self.config.output_dir)
+        best_file = out_dir / "best_genomes" / f"gen_{prev_gen.generation_index:04d}.json"
+        if not best_file.exists():
+            return {}
+        try:
+            best_dict = json.loads(best_file.read_text())
+        except Exception:
+            return {}
+
+        from genome.schema import CandidateGenome, DcaGenome, TpGenome, ConfirmationIndicator
+
+        try:
+            dca_d = best_dict["dca_genome"]
+            tp_d = best_dict["tp_genome"]
+            # Coerce confirmation_indicators back to enums (JSON round-trip strips them)
+            raw_inds = dca_d.get("confirmation_indicators", [])
+            coerced_inds = []
+            for x in raw_inds:
+                if isinstance(x, str):
+                    try:
+                        coerced_inds.append(ConfirmationIndicator(x))
+                    except ValueError:
+                        pass
+                else:
+                    coerced_inds.append(x)
+            dca = DcaGenome(
+                grid_method=dca_d.get("grid_method", "fixed_pct"),
+                grid_params=dca_d.get("grid_params", {}),
+                allocation_method=dca_d.get("allocation_method", "equal"),
+                allocation_params=dca_d.get("allocation_params", {}),
+                max_dca_layers=dca_d.get("max_dca_layers", 3),
+                confirmation_indicators=coerced_inds,
+                indicator_params=dca_d.get("indicator_params", {}),
+            )
+            tp = TpGenome(
+                exit_method=tp_d.get("exit_method", "fixed"),
+                exit_params=tp_d.get("exit_params", {}),
+            )
+            best = CandidateGenome(
+                genome_id=best_dict.get("genome_id", f"genome_G{prev_gen.generation_index}_best"),
+                dca_genome=dca,
+                tp_genome=tp,
+            )
+        except Exception:
+            return {}
+
+        result: dict[int, list[CandidateGenome]] = {}
+        for iid in range(1, self.config.n_islands + 1):
+            elites = [best]
+            if hasattr(self, "_incoming_migrants") and self._incoming_migrants:
+                for m in self._incoming_migrants.get(iid, []):
+                    elites.append(m)
+            result[iid] = elites
+
+        return result
+
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
 
     def _empty_fitness(self, candidate_id: str):
         """Empty MonthlyFitnessResult for error cases."""
@@ -535,15 +797,28 @@ class EvolutionHarness:
                 CandidateGenome,
                 DcaGenome,
                 TpGenome,
+                ConfirmationIndicator,
             )
             dca_d = best_dict["dca_genome"]
             tp_d = best_dict["tp_genome"]
+            raw_inds = dca_d.get("confirmation_indicators", [])
+            coerced_inds = []
+            for x in raw_inds:
+                if isinstance(x, str):
+                    try:
+                        coerced_inds.append(ConfirmationIndicator(x))
+                    except ValueError:
+                        pass
+                else:
+                    coerced_inds.append(x)
             dca = DcaGenome(
                 grid_method=dca_d.get("grid_method", "fixed_pct"),
                 grid_params=dca_d.get("grid_params", {}),
                 allocation_method=dca_d.get("allocation_method", "equal"),
                 allocation_params=dca_d.get("allocation_params", {}),
                 max_dca_layers=dca_d.get("max_dca_layers", 3),
+                confirmation_indicators=coerced_inds,
+                indicator_params=dca_d.get("indicator_params", {}),
             )
             tp = TpGenome(
                 exit_method=tp_d.get("exit_method", "fixed"),

@@ -47,6 +47,13 @@ class EvolutionConfig:
     leaderboard_top_n: int = 20
     # Stage 9 specific
     tp_pct: float = 0.02  # the locked fixed-TP baseline value
+    # Island mode (Plan B, effective 2026-06-22)
+    island_mode: bool = False  # if True, use 8-island sub-population model
+    n_islands: int = 8
+    migration_every_n_gens: int = 5
+    migrants_per_island: int = 4
+    # Stagnation: if True, stagnation guard fires per-island (not globally)
+    per_island_stagnation: bool = True
 
     def __post_init__(self) -> None:
         if self.candidates_per_gen < 1:
@@ -97,6 +104,11 @@ class EvolutionConfig:
             "parallel_workers": self.parallel_workers,
             "base_seed": self.base_seed,
             "tp_pct": self.tp_pct,
+            "island_mode": self.island_mode,
+            "n_islands": self.n_islands,
+            "migration_every_n_gens": self.migration_every_n_gens,
+            "migrants_per_island": self.migrants_per_island,
+            "per_island_stagnation": self.per_island_stagnation,
         }
 
     @classmethod
@@ -117,4 +129,9 @@ class EvolutionConfig:
             output_dir=d.get("output_dir", "results/evolution"),
             experiment_id=d.get("experiment_id", "exp_default"),
             leaderboard_top_n=d.get("leaderboard_top_n", 20),
+            island_mode=d.get("island_mode", False),
+            n_islands=d.get("n_islands", 8),
+            migration_every_n_gens=d.get("migration_every_n_gens", 5),
+            migrants_per_island=d.get("migrants_per_island", 4),
+            per_island_stagnation=d.get("per_island_stagnation", True),
         )
