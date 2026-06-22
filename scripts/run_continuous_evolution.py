@@ -165,6 +165,23 @@ def main() -> int:
         help="Fresh random candidates per generation (default 180)",
     )
     parser.add_argument(
+        "--retirement-enabled",
+        action="store_true",
+        help="Enable island retirement: archive islands whose top fitness crosses --retirement-threshold",
+    )
+    parser.add_argument(
+        "--retirement-threshold",
+        type=float,
+        default=0.80,
+        help="Per-island top fitness that triggers retirement (default 0.80)",
+    )
+    parser.add_argument(
+        "--retirement-archive-dir",
+        type=str,
+        default="runs/retired_islands",
+        help="Root directory for archived islands (default runs/retired_islands)",
+    )
+    parser.add_argument(
         "--mutation-rate",
         type=float,
         default=0.45,
@@ -272,6 +289,9 @@ def _run_evolution(args: argparse.Namespace) -> int:
         island_mode=args.island_mode,
         n_islands=args.n_islands,
         migration_every_n_gens=args.migration_every,
+        retirement_enabled=args.retirement_enabled,
+        retirement_threshold=args.retirement_threshold,
+        retirement_archive_dir=args.retirement_archive_dir,
     )
     print(
         f"[evo] GA config: cands={args.candidates} elites={args.elite_count} "

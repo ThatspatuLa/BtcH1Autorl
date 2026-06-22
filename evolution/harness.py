@@ -80,6 +80,29 @@ def _seed_island_via_spec(
     )[:count]
 
 
+def _make_island_spec_from_bias(island_id: int, bias: dict, n_candidates: int):
+    """Build a transient IslandSpec from a bias dict (used for retirement re-seeds).
+
+    bias dict keys (any subset):
+      - name: str (for logging)
+      - forced_grid_methods: tuple[GridMethod, ...]
+      - forced_allocation: AllocationMethod
+      - forced_confirmations: tuple[ConfirmationIndicator, ...]
+      - max_dca_layers_cap: int
+    """
+    from evolution.islands import IslandSpec
+    return IslandSpec(
+        island_id=island_id,
+        name=bias.get("name", f"retired_replaced_{island_id}"),
+        n_candidates=n_candidates,
+        forced_grid_methods=bias.get("forced_grid_methods"),
+        forced_allocation=bias.get("forced_allocation"),
+        forced_confirmations=bias.get("forced_confirmations"),
+        max_dca_layers_cap=bias.get("max_dca_layers_cap"),
+        note=f"re-seeded after retirement (was: {bias.get('name', '?')})",
+    )
+
+
 @dataclass
 class HarnessHooks:
     """Optional callbacks for observability/testing."""
@@ -116,6 +139,18 @@ class EvolutionHarness:
         self._last_migration_gen: int = -1
         # Incoming migrants from last migration step
         self._incoming_migrants: dict[int, list[CandidateGenome]] = {}
+        # Retirement state (effective 2026-06-22, Six's plan B extension).
+        # {island_id: family_bias_dict}. Updated when an island is retired.
+        self._island_family_bias: dict[int, dict[str, Any]] = {}
+        # All retirement records produced in this run (one entry per retired slot).
+        self._retired_records: list[Any] = []  # list[RetiredIslandRecord]
+        # Cycle ID used as the prefix for retired island directories.
+        self._cycle_id: str = time.strftime("%Y%m%d_%H%M%S")
+        # Recent bias names (anti-clustering when picking fresh biases)
+        self._recent_bias_names: list[str] = []
+        # Reference to the GenerationHistory object during run(), used by
+        # retirement to read per-island history slice.
+        self._last_history: Any = None  # type: ignore[name-defined]  # noqa: F821
 
     def _setup_signal_handler(self) -> None:
         """SIGINT (Ctrl+C) saves state and exits cleanly."""
@@ -188,6 +223,134 @@ class EvolutionHarness:
         )
         return all_stagnant
 
+    # ------------------------------------------------------------------
+    # Retirement (effective 2026-06-22, Six's plan B extension)
+    # ------------------------------------------------------------------
+
+    def _init_island_family_bias(self) -> None:
+        """Seed _island_family_bias from static ISLAND_SPECS at startup."""
+        if self._island_family_bias:
+            return  # already initialized (e.g. on resume)
+        from evolution.islands import get_island_specs
+        for spec in get_island_specs()[:self.config.n_islands]:
+            bias = {"name": spec.name}
+            if spec.forced_grid_methods is not None:
+                bias["forced_grid_methods"] = spec.forced_grid_methods
+            if spec.forced_allocation is not None:
+                bias["forced_allocation"] = spec.forced_allocation
+            if spec.forced_confirmations is not None:
+                bias["forced_confirmations"] = spec.forced_confirmations
+            if spec.max_dca_layers_cap is not None:
+                bias["max_dca_layers_cap"] = spec.max_dca_layers_cap
+            self._island_family_bias[spec.island_id] = bias
+
+    def _check_retirement(
+        self,
+        gen_record: GenerationRecord,
+        candidates: list,
+        rng: random.Random,
+    ) -> tuple[list[dict], dict[int, str]]:
+        """Check per-island top fitness against retirement threshold.
+
+        For each island whose per_island_best_fitness crosses the threshold,
+        archive the island's current top elites + per-island history, then
+        mark the slot for re-seeding with a fresh bias.
+
+        Returns:
+            (retired_records, bias_overrides_for_next_gen)
+        """
+        if not self.config.retirement_enabled:
+            return [], {}
+
+        # Lazy init (handles resume + first-call)
+        if not self._island_family_bias:
+            self._init_island_family_bias()
+
+        from evolution.retirement import (
+            RetirementPolicy,
+            check_for_retirements,
+        )
+
+        policy = RetirementPolicy(
+            enabled=True,
+            threshold=self.config.retirement_threshold,
+            archive_dir=self.config.retirement_archive_dir,
+            max_retired_per_cycle=self.config.max_retired_per_cycle,
+        )
+
+        # Build elites_by_island: {island_id: [(genome, fitness), ...]}
+        # We need the full CandidateGenome objects for the archive, not just IDs.
+        # Re-derive from gen_record.evaluated_candidate_ids + the original candidates.
+        cand_by_id = {c.genome_id: c for c in candidates}
+        elites_by_island: dict[int, list[tuple]] = {}
+
+        # Iterate leaderboard (top by discovery_fitness) and bucket by island_id
+        from evolution.population_builder import get_island_id_for_genome
+        for entry in gen_record.leaderboard:
+            gid = entry["genome_id"]
+            cand = cand_by_id.get(gid)
+            if cand is None:
+                continue
+            iid = get_island_id_for_genome(cand)
+            if iid == 0:
+                continue
+            elites_by_island.setdefault(iid, []).append((cand, entry["discovery_fitness"]))
+
+        # Per-island history slice — just the per-island_best_fitness over gens
+        per_island_history: dict[int, list[dict]] = {}
+        last_history = getattr(self, "_last_history", None)
+        if last_history is not None:
+            for gen in last_history.generations:
+                for iid, fit in (gen.per_island_best_fitness or {}).items():
+                    per_island_history.setdefault(iid, []).append({
+                        "gen": gen.generation_index,
+                        "best_fitness": fit,
+                        "n_passed": gen.per_island_best_count.get(iid, 0),
+                        "n_elite": gen.per_island_elite_count.get(iid, 0),
+                    })
+
+        retired_records, new_assignments = check_for_retirements(
+            policy=policy,
+            cycle_id=self._cycle_id,
+            cycle_output_dir=self.config.output_dir,
+            gen_record=gen_record,
+            elites_by_island=elites_by_island,
+            family_bias_by_island=self._island_family_bias,
+            per_island_history_by_island=per_island_history,
+            rng=rng,
+        )
+
+        # Update internal state
+        for rec in retired_records:
+            self._retired_records.append(rec)
+            # Replace bias
+            old_bias = self._island_family_bias.get(rec.island_id, {})
+            old_name = old_bias.get("name", "?")
+            fresh = new_assignments.get(rec.island_id, {})
+            self._island_family_bias[rec.island_id] = fresh
+            new_name = fresh.get("name", "?")
+            self._recent_bias_names.append(new_name)
+            # Trim recent list
+            if len(self._recent_bias_names) > 8:
+                self._recent_bias_names = self._recent_bias_names[-8:]
+            print(
+                f"[evo] 🏝️ RETIRED island {rec.island_id} ({old_name}) "
+                f"@ gen {rec.retired_at_gen} fitness={rec.per_island_top_fitness:.4f} "
+                f"→ replaced with {new_name}",
+                flush=True,
+            )
+
+        bias_overrides = {iid: b.get("name", "?") for iid, b in new_assignments.items()}
+        # Also reset per-island state for retired islands
+        for rec in retired_records:
+            self._island_best_fitness.pop(rec.island_id, None)
+            self._island_stagnation_counter.pop(rec.island_id, None)
+
+        return (
+            [r.to_dict() for r in retired_records],
+            bias_overrides,
+        )
+
     # _per_island_best_from_record removed: per-island best fitness is now
     # computed inline in _run_generation and stored on gen_record directly.
 
@@ -218,6 +381,12 @@ class EvolutionHarness:
         # Resume from the next generation
         start_gen = len(history.generations)
         rng = self._rng if self._rng is not None else random.Random(self.config.base_seed + start_gen)
+
+        # Initialize island family-bias map (used by retirement)
+        if self.config.island_mode:
+            self._init_island_family_bias()
+        # Keep last history accessible for retirement's per-island history slice
+        self._last_history = history
 
         # Track stagnation state across the run
         last_improvement_gen = start_gen  # any improvement since start is "now"
@@ -539,6 +708,14 @@ class EvolutionHarness:
         else:
             (Path(self.config.output_dir) / "best_genomes").mkdir(parents=True, exist_ok=True)
 
+        # 6) Retirement check (effective 2026-06-22, Six's plan B extension).
+        #    Only fires when retirement_enabled=True. Archives any island whose
+        #    per_island_best_fitness crossed the threshold this gen, then marks
+        #    the slot for re-seeding with a fresh bias.
+        retired_dicts, bias_overrides = self._check_retirement(record, candidates, rng)
+        record.retired_islands = retired_dicts
+        record.island_bias_overrides = bias_overrides
+
         return record
 
     # ------------------------------------------------------------------
@@ -678,6 +855,23 @@ class EvolutionHarness:
             and gen_idx - self._last_migration_gen >= self.config.migration_every_n_gens
         ):
             self._do_migration(prev_gen, gen_idx, rng)
+
+        # 1b. Apply retirement bias overrides from previous gen.
+        #     If island X was retired last gen, use the fresh-bias spec instead
+        #     of the static ISLAND_SPECS[X] spec.
+        bias_overrides: dict[int, str] = dict(prev_gen.island_bias_overrides or {})  # type: ignore[arg-type]
+        if bias_overrides:
+            for iid, bias_name in bias_overrides.items():  # type: ignore[union-attr]
+                if 1 <= iid <= len(specs):
+                    bias = self._island_family_bias.get(iid, {})
+                    specs[iid - 1] = _make_island_spec_from_bias(
+                        iid, bias, specs[iid - 1].n_candidates,
+                    )
+                    print(
+                        f"[evo] gen {gen_idx}: island {iid} using fresh bias "
+                        f"'{bias_name}' (post-retirement re-seed)",
+                        flush=True,
+                    )
 
         # 2. Load per-island elites from previous generation's leaderboard
         per_island_elite_genomes = self._load_per_island_elites(prev_gen, gen_idx)

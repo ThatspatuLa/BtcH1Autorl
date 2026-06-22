@@ -61,6 +61,15 @@ class EvolutionConfig:
     # becoming the seed of a 4-gen plateau.
     min_consistency_for_elite: float = 0.50
     min_discovery_for_elite: float = 0.70
+    # Island retirement (effective 2026-06-22, Six's plan B extension).
+    # When any island's per-island top fitness crosses `retirement_threshold`,
+    # that island's full state is archived to `retirement_archive_dir` and the
+    # slot is re-seeded with a fresh family bias from a 16-bias rotation pool.
+    # This expands the retired-islands archive over time without ending the run.
+    retirement_enabled: bool = False
+    retirement_threshold: float = 0.80
+    retirement_archive_dir: str = "runs/retired_islands"
+    max_retired_per_cycle: int = 999  # 999 = no cap (default; user can tighten)
 
     def __post_init__(self) -> None:
         if self.candidates_per_gen < 1:
