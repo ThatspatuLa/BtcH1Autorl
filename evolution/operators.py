@@ -13,6 +13,7 @@ chance of coming from parent A vs parent B.
 from __future__ import annotations
 
 import random
+from typing import Any
 
 from genome.schema import (
     AllocationMethod,
@@ -266,6 +267,31 @@ def random_candidate_genome(
 # Mutation
 # ============================================================
 
+
+def _inherit_island_tag(parent: CandidateGenome) -> list[dict[str, Any]]:
+    """Phase F — extract the parent's island_assign mutation_op tag(s).
+
+    Used by mutate() and crossover() to preserve lineage island_id through
+    reproduction. Returns a list (possibly empty) of island_assign ops to
+    append to the child's mutation_ops.
+
+    Per the bug Six found: previously, mutate() and crossover() REPLACED
+    mutation_ops with a fresh list, losing the parent's island_assign tag.
+    This caused `per_island_best_fitness` to stay empty `{}` and retirement
+    to never fire.
+    """
+    out: list[dict[str, Any]] = []
+    if not parent or not parent.lineage:
+        return out
+    for op in (parent.lineage.mutation_ops or []):
+        if isinstance(op, dict) and op.get("op") == "island_assign":
+            out.append({
+                "op": "island_assign",
+                "island_id": int(op.get("island_id", 0)),
+            })
+    return out
+
+
 def mutate(
     parent: CandidateGenome,
     rng: random.Random | None = None,
@@ -425,10 +451,13 @@ def mutate(
             parent_b_id=None,
             generation_index=parent.lineage.generation_index + 1,
             mutation_seed=rng.randint(0, 2**31 - 1),
-            mutation_ops=[{
-                "op": "mutate",
-                "parent_id": parent.genome_id,
-            }],
+            # Phase F: inherit parent's island_assign tag so per-island lineage
+            # is preserved through mutations (was the bug that made retirement
+            # never fire).
+            mutation_ops=[
+                {"op": "mutate", "parent_id": parent.genome_id},
+                *_inherit_island_tag(parent),
+            ],
         ),
     )
 
@@ -570,10 +599,15 @@ def crossover(
             parent_b_id=parent_b.genome_id,
             generation_index=max(parent_a.lineage.generation_index, parent_b.lineage.generation_index) + 1,
             mutation_seed=rng.randint(0, 2**31 - 1),
-            mutation_ops=[{
-                "op": "crossover",
-                "parent_a_id": parent_a.genome_id,
-                "parent_b_id": parent_b.genome_id,
-            }],
+            # Phase F: child inherits island_assign from PRIMARY parent (parent_a).
+            # If parent_a has no island tag but parent_b does, fall back to parent_b.
+            mutation_ops=[
+                {
+                    "op": "crossover",
+                    "parent_a_id": parent_a.genome_id,
+                    "parent_b_id": parent_b.genome_id,
+                },
+                *(_inherit_island_tag(parent_a) or _inherit_island_tag(parent_b)),
+            ],
         ),
     )

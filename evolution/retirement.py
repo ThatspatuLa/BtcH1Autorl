@@ -94,11 +94,39 @@ class RetirementPolicy:
     archive_dir: str = "runs/retired_islands"  # root for archived islands
     max_retired_per_cycle: int = 999         # 999 = no cap
     recent_bias_window: int = 4              # avoid re-using last N biases when picking fresh
+    # Phase F7: minimum deployment-passing candidates required to retire.
+    # A high-fitness island with ZERO deployment-passing candidates is suspicious
+    # (could be curve-fit, over-fit, or not robust enough to clear all gates).
+    # Default 1 = at least one must have passed.
+    min_deployment_passing: int = 1
 
     def should_retire(self, per_island_top_fitness: float) -> bool:
         if not self.enabled:
             return False
         return per_island_top_fitness >= self.threshold
+
+    def check_eligibility(
+        self,
+        island_id: int,
+        per_island_top_fitness: float,
+        deployment_passing_count: int,
+    ) -> bool:
+        """Phase F7 — return True iff the island is eligible to be retired.
+
+        Two conditions, both must be true:
+        1. per_island_top_fitness >= threshold
+        2. deployment_passing_count >= min_deployment_passing
+
+        Returns False if the policy is disabled, fitness is too low, or
+        the island hasn't produced any deployment-passing candidates.
+        """
+        if not self.enabled:
+            return False
+        if per_island_top_fitness < self.threshold:
+            return False
+        if deployment_passing_count < self.min_deployment_passing:
+            return False
+        return True
 
 
 # ============================================================
@@ -317,7 +345,19 @@ def check_for_retirements(
     recent_bias_names: list[str] = []
 
     for island_id, top_fit in (gen_record.per_island_best_fitness or {}).items():
-        if not policy.should_retire(top_fit):
+        # Phase F7: also require deployment-passing count >= min threshold.
+        # Use the check_eligibility method on policy to combine both gates.
+        # The deployment_passing count comes from per_island_best_count on the
+        # gen_record (populated by harness when iterating passed candidates).
+        deploy_passing = 0
+        if gen_record is not None and hasattr(gen_record, "per_island_best_count"):
+            deploy_passing = (gen_record.per_island_best_count or {}).get(island_id, 0)
+
+        if not policy.check_eligibility(
+            island_id=island_id,
+            per_island_top_fitness=top_fit,
+            deployment_passing_count=deploy_passing,
+        ):
             continue
 
         # Find the elites for this island

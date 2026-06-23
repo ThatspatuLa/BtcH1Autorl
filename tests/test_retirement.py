@@ -260,9 +260,20 @@ class TestArchiveIsland:
 class _FakeGenRecord:
     """Minimal stand-in for GenerationRecord for retirement-check tests."""
 
-    def __init__(self, per_island_best_fitness: dict[int, float], generation_index: int = 0):
+    def __init__(
+        self,
+        per_island_best_fitness: dict[int, float],
+        generation_index: int = 0,
+        per_island_best_count: dict[int, int] | None = None,
+    ):
         self.per_island_best_fitness = per_island_best_fitness
         self.generation_index = generation_index
+        # Phase F: also accept per-island deployment-passing count.
+        # Default to {island_id: 1} for each island in the fitness dict so
+        # pre-Phase F tests still pass (assumed "at least one passed").
+        self.per_island_best_count = per_island_best_count or {
+            iid: 1 for iid in per_island_best_fitness
+        }
 
 
 class TestCheckForRetirements:
