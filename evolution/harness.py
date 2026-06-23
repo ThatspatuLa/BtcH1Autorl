@@ -230,6 +230,159 @@ class EvolutionHarness:
         return all_stagnant
 
     # ------------------------------------------------------------------
+    # Force-retire on per-island stagnation (Plan: 2026-06-24, Six)
+    # ------------------------------------------------------------------
+
+    def _check_force_retire(
+        self,
+        gen_record: GenerationRecord,
+        gen_idx: int,
+        candidates: list,
+        rng: random.Random,
+    ) -> tuple[list[dict], dict[int, str]]:
+        """Per-island force-retire: kill dead islands, re-seed from pool.
+
+        Rule (per Six's spec, 2026-06-24):
+            If an island's stagnation_counter >= force_retire_after_gens
+            AND its top fitness is < force_retire_min_fitness
+            AND it hasn't been re-seeded in the last 3 gens
+            → archive it (reason="stagnation_force") and re-seed with
+              a fresh bias from the 17-bias pool.
+
+        This complements `_check_stagnation` (which terminates the WHOLE
+        run when ALL islands stagnate) and `_check_retirement` (which
+        archives on fitness ≥ threshold). Force-retire keeps individual
+        dead islands from holding slots while the rest of the population
+        is still improving.
+
+        Returns:
+            (force_retired_dicts, bias_overrides)
+            Same shape as `_check_retirement`.
+        """
+        if not self.config.retirement_enabled:
+            return [], {}
+        if self.config.force_retire_after_gens < 1:
+            return [], {}
+
+        from evolution.retirement import (
+            RetirementPolicy,
+            archive_island,
+            pick_fresh_bias,
+        )
+
+        # Lazy init (handles resume + first-call)
+        if not self._island_family_bias:
+            self._init_island_family_bias()
+
+        # Find islands eligible for force-retire
+        to_force_retire: list[int] = []
+        for iid, counter in self._island_stagnation_counter.items():
+            if counter < self.config.force_retire_after_gens:
+                continue
+            island_best = self._island_best_fitness.get(iid, 0.0)
+            # Skip if fitness is already near the bar — let it keep trying
+            if island_best >= self.config.force_retire_min_fitness:
+                continue
+            # Skip if recently re-seeded (grace period of 3 gens)
+            last_reseed_gen = self._force_retired_at_gen.get(iid, -999)
+            if gen_idx - last_reseed_gen < 3:
+                continue
+            to_force_retire.append(iid)
+
+        if not to_force_retire:
+            return [], {}
+
+        policy = RetirementPolicy(
+            enabled=True,
+            threshold=self.config.retirement_threshold,
+            archive_dir=self.config.retirement_archive_dir,
+            max_retired_per_cycle=self.config.max_retired_per_cycle,
+        )
+
+        cand_by_id = {c.genome_id: c for c in candidates}
+
+        retired_records: list[Any] = []
+        bias_overrides: dict[int, str] = {}
+
+        for iid in to_force_retire:
+            # Get the elites for this island (same logic as _check_retirement)
+            elites: list[tuple[Any, float]] = []
+            for entry in gen_record.leaderboard:
+                gid = entry["genome_id"]
+                cand = cand_by_id.get(gid)
+                if cand is None:
+                    continue
+                from evolution.population_builder import get_island_id_for_genome
+                if get_island_id_for_genome(cand) == iid:
+                    elites.append((cand, entry["discovery_fitness"]))
+
+            if not elites:
+                # Nothing to archive — just re-seed and reset counters
+                fresh = pick_fresh_bias(
+                    rng,
+                    exclude_recent=self._recent_bias_names[-policy.recent_bias_window:],
+                )
+                old_name = self._island_family_bias.get(iid, {}).get("name", "?")
+                self._island_family_bias[iid] = fresh
+                self._island_best_fitness.pop(iid, None)
+                self._island_stagnation_counter[iid] = 0
+                self._force_retired_at_gen[iid] = gen_idx
+                self._recent_bias_names.append(fresh.get("name", "?"))
+                if len(self._recent_bias_names) > 8:
+                    self._recent_bias_names = self._recent_bias_names[-8:]
+                bias_overrides[iid] = fresh.get("name", "?")
+                print(
+                    f"[evo] 🔁 FORCE-RETIRED island {iid} ({old_name}) "
+                    f"@ gen {gen_idx} (stagnation={self.config.force_retire_after_gens}, "
+                    f"no elites to archive) → {fresh.get('name', '?')}",
+                    flush=True,
+                )
+                continue
+
+            bias = self._island_family_bias.get(iid, {"name": f"unknown_{iid}"})
+            record = archive_island(
+                policy=policy,
+                cycle_id=self._cycle_id,
+                cycle_output_dir=self.config.output_dir,
+                island_id=iid,
+                retired_at_gen=gen_idx,
+                family_bias=bias,
+                per_island_top_fitness=self._island_best_fitness.get(iid, 0.0),
+                elites=elites,
+                generations_evolved=gen_idx + 1,
+            )
+            retired_records.append(record)
+            self._retired_records.append(record)
+
+            old_name = bias.get("name", "?")
+            fresh = pick_fresh_bias(
+                rng,
+                exclude_recent=self._recent_bias_names[-policy.recent_bias_window:],
+            )
+            self._island_family_bias[iid] = fresh
+            self._island_best_fitness.pop(iid, None)
+            self._island_stagnation_counter[iid] = 0
+            self._force_retired_at_gen[iid] = gen_idx
+            self._recent_bias_names.append(fresh.get("name", "?"))
+            if len(self._recent_bias_names) > 8:
+                self._recent_bias_names = self._recent_bias_names[-8:]
+            bias_overrides[iid] = fresh.get("name", "?")
+
+            print(
+                f"[evo] 🔁 FORCE-RETIRED island {iid} ({old_name}) "
+                f"@ gen {gen_idx} fitness={record.per_island_top_fitness:.4f} "
+                f"(stagnation={self.config.force_retire_after_gens}) "
+                f"→ {fresh.get('name', '?')}",
+                flush=True,
+            )
+
+        # Return shape mirrors _check_retirement: dicts (not RetiredIslandRecord)
+        return (
+            [r.to_dict() for r in retired_records],
+            bias_overrides,
+        )
+
+    # ------------------------------------------------------------------
     # Retirement (effective 2026-06-22, Six's plan B extension)
     # ------------------------------------------------------------------
 
@@ -748,6 +901,20 @@ class EvolutionHarness:
         retired_dicts, bias_overrides = self._check_retirement(record, candidates, rng)
         record.retired_islands = retired_dicts
         record.island_bias_overrides = bias_overrides
+
+        # 6b) Force-retire on per-island stagnation (Plan: 2026-06-24, Six).
+        #     Fires AFTER fitness-retirement so the priority order is:
+        #       fitness ≥ threshold → archive with reason "fitness"
+        #       stagnation ≥ N gens + fitness < min → archive with reason "stagnation_force"
+        #     A force-retire in the same gen as a fitness-retire is fine —
+        #     different islands, different rules.
+        force_dicts, force_bias_overrides = self._check_force_retire(
+            record, gen_idx, candidates, rng,
+        )
+        if force_dicts:
+            # Merge into the record's retirement lists so it persists + reports
+            record.retired_islands.extend(force_dicts)
+            record.island_bias_overrides.update(force_bias_overrides)
 
         return record
 

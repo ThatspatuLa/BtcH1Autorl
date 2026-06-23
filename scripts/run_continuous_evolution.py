@@ -161,8 +161,8 @@ def main() -> int:
     parser.add_argument(
         "--random-injection",
         type=int,
-        default=180,
-        help="Fresh random candidates per generation (default 180)",
+        default=220,
+        help="Fresh random candidates per generation (default 220 — push harder from 180)",
     )
     parser.add_argument(
         "--retirement-enabled",
