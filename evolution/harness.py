@@ -638,6 +638,12 @@ class EvolutionHarness:
                 "n_cycles_closed": r.n_cycles_closed,
                 "final_equity": r.final_equity,
                 "max_dd_pct": r.max_dd_pct,
+                # Phase D — Discovery Fitness v2 component scores
+                "full_period_base_score": r.full_period_base_score,
+                "recovery_score": r.recovery_score,
+                "stability_score": r.stability_score,
+                "concentration_score": r.concentration_score,
+                "recovery_breakdown": dict(r.recovery_breakdown or {}),
             }
             for i, r in enumerate(top_discovery)
         ]
