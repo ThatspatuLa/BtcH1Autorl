@@ -8,10 +8,15 @@ Files written per evolution run (in output_dir):
 - unfinished_status.json     — written if run halts before completion
 - final_status.json          — written on clean completion
 - run_summary.json           — written on completion OR halt
+
+Checkpoints (per-cycle, under checkpoints/ in project root):
+- checkpoint_<cycle>_<HHMM>.json  — snapshot every N minutes (default 20)
+- latest.json                     — symlink/copy of the most recent checkpoint
 """
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -232,3 +237,127 @@ def save_rejection_report(
 ) -> None:
     out = Path(output_dir) / "rejection_reports"
     _atomic_write(out / f"gen_{generation_index:04d}.json", rejection_reasons)
+
+
+# ============================================================
+# Checkpoints — every-N-minute snapshots for restart safety
+# ============================================================
+# Designed so that if the user restarts the computer mid-cycle, the next
+# `minato_fast_tick.sh` invocation can detect the latest checkpoint and
+# resume from the last completed generation instead of starting over.
+#
+# Checkpoints live under <project_root>/checkpoints/ (NOT in output_dir) so
+# they survive a fresh cycle's output directory. The cycle_id is part of the
+# filename so multiple cycles don't collide.
+
+CHECKPOINT_ROOT = Path("checkpoints")
+
+
+def _checkpoint_dir() -> Path:
+    """Return (and create) the project-root checkpoint directory."""
+    CHECKPOINT_ROOT.mkdir(parents=True, exist_ok=True)
+    return CHECKPOINT_ROOT
+
+
+def save_checkpoint(
+    cycle_id: str,
+    gen_idx: int,
+    wall_time_used: float,
+    per_island_best_fitness: dict[int, float],
+    per_island_stagnation_counter: dict[int, int],
+    retired_so_far: list[dict[str, Any]],
+    rng_state: tuple[Any, ...] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> Path:
+    """Write a snapshot of the current evolution state.
+
+    Files written:
+        checkpoints/checkpoint_<cycle_id>_<HHMM>.json
+        checkpoints/latest.json   (copy, points at the most recent)
+
+    The HHMM comes from the current wall-clock minute so successive saves
+    within the same minute overwrite each other (cheap dedup). Saves that
+    fall on the 20-min boundary produce a new file.
+
+    Returns the path of the per-minute checkpoint file.
+    """
+    ck_dir = _checkpoint_dir()
+    ts_minute = time.strftime("%H%M", time.localtime())
+    filename = f"checkpoint_{cycle_id}_{ts_minute}.json"
+    out_path = ck_dir / filename
+
+    payload = {
+        "cycle_id": cycle_id,
+        "saved_at": time.time(),
+        "generation_index": gen_idx,
+        "wall_time_used": wall_time_used,
+        "per_island_best_fitness": dict(per_island_best_fitness),
+        "per_island_stagnation_counter": dict(per_island_stagnation_counter),
+        "retired_so_far_count": len(retired_so_far),
+        "retired_so_far": retired_so_far,
+        "rng_state": list(rng_state) if rng_state is not None else None,
+        "extra": extra or {},
+    }
+    _atomic_write(out_path, payload)
+
+    # Also write `latest.json` (always the most recent snapshot).
+    latest_path = ck_dir / "latest.json"
+    _atomic_write(latest_path, payload)
+
+    return out_path
+
+
+def load_latest_checkpoint(cycle_id: str | None = None) -> dict[str, Any] | None:
+    """Load the most recent checkpoint.
+
+    If cycle_id is given, return the most recent checkpoint matching that
+    cycle. Otherwise return the global `latest.json` snapshot (regardless
+    of cycle_id, so the fast-tick can decide whether to resume or start
+    fresh based on age).
+
+    Returns None if no checkpoint exists.
+    """
+    ck_dir = _checkpoint_dir()
+    latest_path = ck_dir / "latest.json"
+    if not latest_path.exists():
+        return None
+    try:
+        with open(latest_path) as f:
+            payload = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    if cycle_id is not None and payload.get("cycle_id") != cycle_id:
+        # latest.json is from a different cycle — caller should treat as no
+        # resume candidate (or scan by cycle_id).
+        return None
+    return payload
+
+
+def list_checkpoints(cycle_id: str | None = None) -> list[dict[str, Any]]:
+    """List all checkpoints (newest first), optionally filtered by cycle_id.
+
+    Returns lightweight dicts (metadata only) — full payload is in `latest.json`.
+    """
+    ck_dir = _checkpoint_dir()
+    out: list[dict[str, Any]] = []
+    for path in sorted(ck_dir.glob("checkpoint_*.json"), reverse=True):
+        try:
+            with open(path) as f:
+                d = json.load(f)
+            if cycle_id is None or d.get("cycle_id") == cycle_id:
+                out.append({
+                    "path": str(path),
+                    "cycle_id": d.get("cycle_id"),
+                    "generation_index": d.get("generation_index"),
+                    "saved_at": d.get("saved_at"),
+                })
+        except (json.JSONDecodeError, OSError, KeyError):
+            continue
+    return out
+
+
+def checkpoint_age_seconds(payload: dict[str, Any]) -> float:
+    """How old is this checkpoint? Used by fast-tick to decide resume vs fresh."""
+    saved_at = payload.get("saved_at", 0.0)
+    return max(0.0, time.time() - float(saved_at))

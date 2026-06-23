@@ -31,7 +31,11 @@ from .operators import crossover, mutate, random_candidate_genome, random_dca_ge
 from .persistence import (
     GenerationHistory,
     UnfinishedStatus,
+    checkpoint_age_seconds,
+    list_checkpoints,
+    load_latest_checkpoint,
     load_state,
+    save_checkpoint,
     save_state,
 )
 
@@ -45,10 +49,14 @@ __all__ = [
     "HarnessHooks",
     "RunSummary",
     "UnfinishedStatus",
+    "checkpoint_age_seconds",
     "crossover",
+    "list_checkpoints",
+    "load_latest_checkpoint",
     "load_state",
     "mutate",
     "random_candidate_genome",
     "random_dca_genome",
+    "save_checkpoint",
     "save_state",
 ]

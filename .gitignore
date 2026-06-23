@@ -36,6 +36,10 @@ results/*
 runs/*
 !runs/.gitkeep
 
+# Checkpoints (runtime snapshots for restart safety — regenerable)
+checkpoints/*
+!checkpoints/.gitkeep
+
 # Per-experiment logs
 logs/*
 !logs/.gitkeep

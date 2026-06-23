@@ -182,6 +182,26 @@ def main() -> int:
         help="Root directory for archived islands (default runs/retired_islands)",
     )
     parser.add_argument(
+        "--checkpoint-interval-min",
+        type=int,
+        default=20,
+        help="Write a checkpoint snapshot every N minutes (default 20). Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--force-retire-after-gens",
+        type=int,
+        default=8,
+        help="Force-retire an island if its top fitness doesn't improve for this many gens "
+             "(default 8). Skip if its top fitness is already >= --force-retire-min-fitness.",
+    )
+    parser.add_argument(
+        "--force-retire-min-fitness",
+        type=float,
+        default=0.70,
+        help="Don't force-retire islands whose top fitness is already at or above this "
+             "(default 0.70). Lets near-passing islands keep trying.",
+    )
+    parser.add_argument(
         "--mutation-rate",
         type=float,
         default=0.45,
@@ -339,6 +359,9 @@ def _run_evolution(args: argparse.Namespace) -> int:
         retirement_enabled=args.retirement_enabled,
         retirement_threshold=args.retirement_threshold,
         retirement_archive_dir=args.retirement_archive_dir,
+        checkpoint_interval_minutes=args.checkpoint_interval_min,
+        force_retire_after_gens=args.force_retire_after_gens,
+        force_retire_min_fitness=args.force_retire_min_fitness,
     )
     print(
         f"[evo] GA config: cands={args.candidates} elites={args.elite_count} "
@@ -406,16 +429,16 @@ def _run_evolution(args: argparse.Namespace) -> int:
                     f"Consistency: {top['consistency_ratio']:.4f}"
                 )
 
-        # Every 5 generations: summary
-        if record.generation_index % 5 == 0:
-            send_discord(
-                f"📊 **Gen {record.generation_index} Summary**\n"
-                f"Passed: {record.n_passed}/{record.n_candidates} | "
-                f"Deploy-passing: {record.n_deployment_passing} | "
-                f"Best fitness: {record.best_fitness:.6f} | "
-                f"Median: {record.median_fitness:.6f}\n"
-                f"Total deploy-passing so far: {n_deploy_passing_total}"
-            )
+        # Per-generation summary (User directive 2026-06-23: "after every generation").
+        # Was previously every-5-gens; switched to every-gen for visibility.
+        send_discord(
+            f"📊 **Gen {record.generation_index} Summary**\n"
+            f"Passed: {record.n_passed}/{record.n_candidates} | "
+            f"Deploy-passing: {record.n_deployment_passing} | "
+            f"Best fitness: {record.best_fitness:.6f} | "
+            f"Median: {record.median_fitness:.6f}\n"
+            f"Total deploy-passing so far: {n_deploy_passing_total}"
+        )
 
     hooks = HarnessHooks(on_generation_end=on_gen_end)
 

@@ -70,6 +70,16 @@ class EvolutionConfig:
     retirement_threshold: float = 0.80
     retirement_archive_dir: str = "runs/retired_islands"
     max_retired_per_cycle: int = 999  # 999 = no cap (default; user can tighten)
+    # Checkpoints (every-N-min snapshots for restart safety).
+    # Written to <project_root>/checkpoints/. Default 20 min = ~6 saves per
+    # 2h cycle. Set to 0 to disable (not recommended for long runs).
+    checkpoint_interval_minutes: int = 20
+    # Force-retire on per-island stagnation (Plan: 2026-06-24, Six).
+    # If an island's per-island best fitness hasn't improved for this many
+    # gens AND its current best is below force_retire_min_fitness, the slot
+    # is re-seeded from the bias rotation pool (logged as "stagnation retire").
+    force_retire_after_gens: int = 8
+    force_retire_min_fitness: float = 0.70  # skip if already near the bar
 
     def __post_init__(self) -> None:
         if self.candidates_per_gen < 1:
@@ -127,6 +137,13 @@ class EvolutionConfig:
             "per_island_stagnation": self.per_island_stagnation,
             "min_consistency_for_elite": self.min_consistency_for_elite,
             "min_discovery_for_elite": self.min_discovery_for_elite,
+            "retirement_enabled": self.retirement_enabled,
+            "retirement_threshold": self.retirement_threshold,
+            "retirement_archive_dir": self.retirement_archive_dir,
+            "max_retired_per_cycle": self.max_retired_per_cycle,
+            "checkpoint_interval_minutes": self.checkpoint_interval_minutes,
+            "force_retire_after_gens": self.force_retire_after_gens,
+            "force_retire_min_fitness": self.force_retire_min_fitness,
         }
 
     @classmethod
@@ -154,4 +171,11 @@ class EvolutionConfig:
             per_island_stagnation=d.get("per_island_stagnation", True),
             min_consistency_for_elite=d.get("min_consistency_for_elite", 0.50),
             min_discovery_for_elite=d.get("min_discovery_for_elite", 0.70),
+            retirement_enabled=d.get("retirement_enabled", False),
+            retirement_threshold=d.get("retirement_threshold", 0.80),
+            retirement_archive_dir=d.get("retirement_archive_dir", "runs/retired_islands"),
+            max_retired_per_cycle=d.get("max_retired_per_cycle", 999),
+            checkpoint_interval_minutes=d.get("checkpoint_interval_minutes", 20),
+            force_retire_after_gens=d.get("force_retire_after_gens", 8),
+            force_retire_min_fitness=d.get("force_retire_min_fitness", 0.70),
         )

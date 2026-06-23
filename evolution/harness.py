@@ -148,6 +148,12 @@ class EvolutionHarness:
         self._cycle_id: str = time.strftime("%Y%m%d_%H%M%S")
         # Recent bias names (anti-clustering when picking fresh biases)
         self._recent_bias_names: list[str] = []
+        # Wall-clock minutes since cycle start at the last checkpoint save.
+        # Tracks elapsed-min, not unix time, so wall-clock skew doesn't matter.
+        self._last_checkpoint_min: float = -1e9  # sentinel → first save at gen 0
+        # Force-retire log: {island_id: gen_when_force_retired}, so we don't
+        # immediately force-retire a freshly re-seeded island.
+        self._force_retired_at_gen: dict[int, int] = {}
         # Reference to the GenerationHistory object during run(), used by
         # retirement to read per-island history slice.
         self._last_history: Any = None  # type: ignore[name-defined]  # noqa: F821
@@ -444,6 +450,27 @@ class EvolutionHarness:
 
                 # Persist state after every gen
                 save_state(history, self.config.output_dir)
+
+                # Periodic checkpoint (every N minutes, default 20).
+                # Write to <project_root>/checkpoints/ so a computer restart
+                # mid-cycle can resume from the latest snapshot.
+                if self.config.checkpoint_interval_minutes > 0:
+                    elapsed_min = (time.time() - t_start) / 60.0
+                    if elapsed_min - self._last_checkpoint_min >= self.config.checkpoint_interval_minutes:
+                        from evolution.persistence import save_checkpoint
+                        retired_dicts = [r.to_dict() for r in self._retired_records]
+                        rng_state = self._rng.getstate() if self._rng else None
+                        save_checkpoint(
+                            cycle_id=self._cycle_id,
+                            gen_idx=gen_idx,
+                            wall_time_used=time.time() - t_start,
+                            per_island_best_fitness=self._island_best_fitness,
+                            per_island_stagnation_counter=self._island_stagnation_counter,
+                            retired_so_far=retired_dicts,
+                            rng_state=rng_state,
+                            extra={"termination_reason": termination_reason},
+                        )
+                        self._last_checkpoint_min = elapsed_min
 
                 if self.hooks.on_generation_end:
                     self.hooks.on_generation_end(gen_record)
