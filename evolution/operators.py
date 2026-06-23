@@ -95,9 +95,16 @@ ALLOCATION_DEFAULT_PARAMS: dict[str, dict[str, float]] = {
 # Parameter ranges (the search space) — Stage 10 widened
 # ============================================================
 
+# User directive 2026-06-23: "lets set up a max DCA layer to be 5 for ongoing
+# crons". Single source of truth — every other layer reads from this constant.
+# Update this value (and the upper bound of DCA_PARAM_RANGES["max_layers"]) if
+# the policy changes. The defence-in-depth clamp in extract_dca_params_from_genome
+# guarantees the cap is enforced even if upstream mutation paths drift.
+GLOBAL_MAX_DCA_LAYERS: int = 5
+
 DCA_PARAM_RANGES: dict[str, tuple[float, float]] = {
     "grid_pct": (0.0025, 0.0125),    # 0.25% – 1.25%
-    "max_layers": (6, 24),           # 6 – 24 layers
+    "max_layers": (2, GLOBAL_MAX_DCA_LAYERS),  # 2 – 5 layers (policy cap)
     "tp_pct": (0.002, 0.010),        # 0.2% – 1.0%
     "cooldown_candles": (0, 12),     # 0 – 12 candles
     "vol_threshold": (1.1, 2.0),     # volatility_high threshold
@@ -345,11 +352,16 @@ def mutate(
     new_grid_params["pct"] = current_pct
 
     # max_layers
+    # Clamp parent value first — legacy genomes may carry max_layers > cap
+    # (e.g. 18 from genome_G1_327669). User directive 2026-06-23: cap at 5.
     current_layers = int(new_grid_params.get("max_layers", parent_dca.max_dca_layers))
+    current_layers = min(current_layers, GLOBAL_MAX_DCA_LAYERS)
     if rng.random() < mutation_rate:
         lo, hi = DCA_PARAM_RANGES["max_layers"]
         delta = rng.choice([-2, -1, 1, 2])
         current_layers = max(lo, min(hi, current_layers + delta))
+    # Final defensive clamp — never exceeds GLOBAL_MAX_DCA_LAYERS
+    current_layers = min(int(current_layers), GLOBAL_MAX_DCA_LAYERS)
     new_grid_params["max_layers"] = current_layers
 
     # tp_pct
@@ -524,11 +536,14 @@ def crossover(
         elif b_val is not None:
             merged_grid[key] = float(b_val)
 
-    # Ensure required keys exist
+    # Ensure required keys exist. Default max_layers respects the policy cap
+    # (User directive 2026-06-23: max 5 layers).
     if "pct" not in merged_grid:
         merged_grid["pct"] = 0.015
     if "max_layers" not in merged_grid:
-        merged_grid["max_layers"] = rng.randint(6, 24)
+        merged_grid["max_layers"] = rng.randint(
+            int(DCA_PARAM_RANGES["max_layers"][0]), GLOBAL_MAX_DCA_LAYERS
+        )
     if "tp_pct" not in merged_grid:
         merged_grid["tp_pct"] = rng.uniform(*DCA_PARAM_RANGES["tp_pct"])
     if "cooldown_candles" not in merged_grid:
@@ -570,7 +585,9 @@ def crossover(
         elif ind.value in INDICATOR_DEFAULT_PARAMS:
             merged_ind_params[ind.value] = dict(INDICATOR_DEFAULT_PARAMS[ind.value])
 
-    max_layers = int(merged_grid["max_layers"])
+    # Final defensive clamp — never exceeds GLOBAL_MAX_DCA_LAYERS.
+    max_layers = min(int(merged_grid["max_layers"]), GLOBAL_MAX_DCA_LAYERS)
+    merged_grid["max_layers"] = max_layers
     tp_pct = float(merged_grid["tp_pct"])
 
     new_dca = DcaGenome(

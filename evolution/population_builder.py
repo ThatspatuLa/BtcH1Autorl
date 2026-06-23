@@ -199,6 +199,7 @@ def _random_tp(rng: random.Random) -> float:
 
 
 def _random_layers(rng: random.Random) -> int:
+    """Random max_layers value within policy range (User directive 2026-06-23: max 5)."""
     lo, hi = DCA_PARAM_RANGES["max_layers"]
     return rng.randint(int(lo), int(hi))
 

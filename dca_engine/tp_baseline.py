@@ -189,6 +189,12 @@ def extract_dca_params_from_genome(genome: CandidateGenome | DcaGenome) -> dict[
     max_layers = int(
         dca.grid_params.get("max_layers", dca.max_dca_layers)
     )
+    # Defensive policy cap (User directive 2026-06-23: max 5 layers). Even if a
+    # legacy genome (e.g. from a prior run) carries max_layers > 5, the
+    # evaluator enforces the cap here. Single source of truth lives in
+    # evolution.operators.GLOBAL_MAX_DCA_LAYERS.
+    from evolution.operators import GLOBAL_MAX_DCA_LAYERS  # lazy import — keeps tp_baseline import-light
+    max_layers = min(max_layers, GLOBAL_MAX_DCA_LAYERS)
     tp_pct = float(dca.grid_params.get("tp_pct", 0.02))
     confirmation_indicators = [c.value for c in dca.confirmation_indicators]
     # Build indicator_params from genome if present, else use defaults

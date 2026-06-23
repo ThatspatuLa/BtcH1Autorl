@@ -155,8 +155,9 @@ def test_random_dca_genome_search_space_includes_tp_pct():
     # grid_pct range: 0.0025..0.0125
     assert all(0.0025 <= p <= 0.0125 for p in pcts)
     assert max(pcts) - min(pcts) > 0.005  # actually varying
-    # max_layers: 6..24
-    assert all(6 <= n_layers <= 24 for n_layers in layers)
+    # max_layers: 2..5 (User directive 2026-06-23: policy cap = 5)
+    from evolution.operators import GLOBAL_MAX_DCA_LAYERS
+    assert all(2 <= n_layers <= GLOBAL_MAX_DCA_LAYERS for n_layers in layers)
     # tp_pct: 0.002..0.010
     assert all(0.002 <= t <= 0.010 for t in tps)
     assert max(tps) - min(tps) > 0.003  # actually varying
