@@ -171,6 +171,59 @@ class TestBiasPool:
             picked = pick_fresh_bias(rng, exclude_recent=exclude)
             assert picked["name"] != first["name"]
 
+    def test_pick_fresh_bias_excludes_families(self):
+        """Six's directive 2026-06-25: replacement island MUST be a new family,
+        never the same grid method as the retiring island."""
+        import random
+        rng = random.Random(42)
+        # Pick a fresh bias with the current family excluded
+        first = pick_fresh_bias(rng)
+        exclude_families = [first["name"]]
+        # Try 30 times — should NEVER return the excluded family
+        for _ in range(30):
+            picked = pick_fresh_bias(rng, exclude_families=exclude_families)
+            assert picked["name"] != first["name"], (
+                f"Replacement picked same family {picked['name']} as retiring island"
+            )
+
+    def test_pick_fresh_bias_excludes_all_active_families(self):
+        """If all 8 islands have unique families and 7 are excluded, the
+        replacement must be a different family — and with 17 total families,
+        9 should still be available (excluding 1 current + 7 active + recent)."""
+        import random
+        rng = random.Random(42)
+        current_family = "fixed_pct"
+        active_families = ["atr", "volatility_or_dd", "trend", "oscillator",
+                           "vola_adj_alloc", "ctrl_exp_alloc", "tight_dca"]
+        picked = pick_fresh_bias(
+            rng,
+            exclude_families=[current_family] + active_families,
+        )
+        assert picked["name"] != current_family
+        assert picked["name"] not in active_families
+        # Should be one of the 9 unused families
+        expected = {"equal_alloc", "linear_inc_alloc", "dd_adj_alloc",
+                    "rsi_confirm", "ma_confirm", "vol_confirm", "no_confirm",
+                    "trend_only_tight", "atr_low_tp"}
+        assert picked["name"] in expected, (
+            f"Picked {picked['name']} but expected one of {expected}"
+        )
+
+    def test_pick_fresh_bias_excludes_both_recent_and_families(self):
+        """Recent + family exclusion work together (union of both sets)."""
+        import random
+        rng = random.Random(42)
+        # Pick a fresh bias, then exclude it as both recent AND family
+        first = pick_fresh_bias(rng)
+        exclude = [first["name"]]
+        for _ in range(20):
+            picked = pick_fresh_bias(
+                rng,
+                exclude_recent=exclude,
+                exclude_families=exclude,
+            )
+            assert picked["name"] != first["name"]
+
 
 # ---------------------------------------------------------------
 # archive_island() tests
@@ -383,6 +436,109 @@ class TestCheckForRetirements:
         assert len(retired) == 1
         # Archive dir should now contain the retired island dir
         assert (Path(tmp_archive_dir) / "retired_20260622_test_1_0").exists()
+
+    def test_replacement_must_be_new_family_not_retiring_island(self, tmp_archive_dir):
+        """Six's directive 2026-06-25: when an island retires, its replacement
+        must be a different family (never the same grid method as the retiring
+        island, never a duplicate of any other active island)."""
+        import random
+        rng = random.Random(42)
+        g = _make_genome("G_a")
+        rec = _FakeGenRecord({1: 0.85})
+        policy = RetirementPolicy(
+            enabled=True, threshold=0.80, archive_dir=tmp_archive_dir
+        )
+        # 8 active islands, each with a unique family
+        family_bias = {
+            1: {"name": "fixed_pct"},
+            2: {"name": "atr"},
+            3: {"name": "volatility_or_dd"},
+            4: {"name": "trend"},
+            5: {"name": "oscillator"},
+            6: {"name": "vola_adj_alloc"},
+            7: {"name": "ctrl_exp_alloc"},
+            8: {"name": "tight_dca"},
+        }
+        retired, assignments = check_for_retirements(
+            policy=policy,
+            cycle_id="x",
+            cycle_output_dir="y",
+            gen_record=rec,
+            elites_by_island={1: [(g, 0.85)]},
+            family_bias_by_island=family_bias,
+            rng=rng,
+        )
+        # Island 1 retires
+        assert len(retired) == 1
+        assert retired[0].island_id == 1
+        # Replacement must be a different family
+        new_family = assignments[1]["name"]
+        assert new_family != "fixed_pct", (
+            f"Replacement picked same family {new_family} as retiring island"
+        )
+        # Replacement must not be any of the other 7 active families
+        active_families = [b["name"] for iid, b in family_bias.items() if iid != 1]
+        assert new_family not in active_families, (
+            f"Replacement {new_family} duplicates active island"
+        )
+        # Should be one of the 9 unused families
+        expected = {"equal_alloc", "linear_inc_alloc", "dd_adj_alloc",
+                    "rsi_confirm", "ma_confirm", "vol_confirm", "no_confirm",
+                    "trend_only_tight", "atr_low_tp"}
+        assert new_family in expected, (
+            f"Replacement {new_family} not in expected unused families {expected}"
+        )
+
+    def test_multiple_simultaneous_retirements_pick_distinct_families(
+        self, tmp_archive_dir
+    ):
+        """If multiple islands retire in the same gen, each replacement must
+        be unique (and different from the original family + all active)."""
+        import random
+        rng = random.Random(42)
+        g1, g3, g7 = _make_genome("G_1"), _make_genome("G_3"), _make_genome("G_7")
+        rec = _FakeGenRecord({1: 0.85, 3: 0.85, 7: 0.85})
+        policy = RetirementPolicy(
+            enabled=True, threshold=0.80, archive_dir=tmp_archive_dir
+        )
+        family_bias = {
+            1: {"name": "fixed_pct"},
+            2: {"name": "atr"},
+            3: {"name": "trend"},
+            4: {"name": "oscillator"},
+            5: {"name": "vola_adj_alloc"},
+            6: {"name": "ctrl_exp_alloc"},
+            7: {"name": "tight_dca"},
+            8: {"name": "volatility_or_dd"},
+        }
+        retired, assignments = check_for_retirements(
+            policy=policy,
+            cycle_id="x",
+            cycle_output_dir="y",
+            gen_record=rec,
+            elites_by_island={
+                1: [(g1, 0.85)],
+                3: [(g3, 0.85)],
+                7: [(g7, 0.85)],
+            },
+            family_bias_by_island=family_bias,
+            rng=rng,
+        )
+        # 3 islands retire
+        assert len(retired) == 3
+        # All 3 get new assignments
+        assert sorted(assignments.keys()) == [1, 3, 7]
+        # Each replacement must be a different family
+        new_families = [assignments[iid]["name"] for iid in [1, 3, 7]]
+        original_families = ["fixed_pct", "trend", "tight_dca"]
+        for i, new in enumerate(new_families):
+            assert new != original_families[i], (
+                f"Island {[1,3,7][i]} got same family {new} back"
+            )
+        # All 3 replacements must be distinct (no two new islands share a family)
+        assert len(set(new_families)) == 3, (
+            f"Duplicate families in replacements: {new_families}"
+        )
 
 
 # ---------------------------------------------------------------

@@ -66,16 +66,24 @@ BIAS_POOL: list[dict[str, Any]] = [
 def pick_fresh_bias(
     rng: random.Random,
     exclude_recent: list[str] | None = None,
+    exclude_families: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Pick a fresh bias from BIAS_POOL, excluding recently-used names.
+    """Pick a fresh bias from BIAS_POOL, excluding recently-used names AND
+    families currently active on other islands.
 
-    exclude_recent: list of bias names to avoid (default: avoid last 4 picks).
+    exclude_recent: list of bias names to avoid (anti-clustering on recent picks).
+    exclude_families: list of bias names currently active on OTHER islands.
+        The retiring island's CURRENT family is auto-added to this list,
+        so a retirement ALWAYS picks a different family.
+        This prevents the failure mode where I1 (fixed_pct) retires and gets
+        reseeded with a fresh fixed_pct seed — that's not a new family.
+
     Returns a copy of the bias dict (with tuples intact).
     """
-    exclude = set(exclude_recent or [])
+    exclude = set(exclude_recent or []) | set(exclude_families or [])
     choices = [b for b in BIAS_POOL if b["name"] not in exclude]
     if not choices:
-        # Fallback if everything is excluded
+        # Fallback if everything is excluded (shouldn't happen with 17 families + 8 islands)
         choices = list(BIAS_POOL)
     picked = rng.choice(choices)
     # Return a shallow copy so caller can mutate without affecting the pool
@@ -390,8 +398,24 @@ def check_for_retirements(
         retired.append(record)
         recent_bias_names.append(bias.get("name", ""))
 
-        # Pick a fresh bias for the slot
-        fresh = pick_fresh_bias(rng, exclude_recent=recent_bias_names[-policy.recent_bias_window:])
+        # Pick a fresh bias for the slot.
+        # The replacement MUST be a different family from:
+        #   1. The retiring island's current bias (so we don't reseed with same family)
+        #   2. All other currently-active islands' biases (so we don't duplicate
+        #      an active family across multiple islands)
+        # This implements Six's directive: "the replacement island should be a
+        # NEW family, not the same grid method."
+        current_bias_name = bias.get("name", "")
+        active_families = [
+            b.get("name", "")
+            for iid, b in family_bias_by_island.items()
+            if iid != island_id and b.get("name")
+        ]
+        fresh = pick_fresh_bias(
+            rng,
+            exclude_recent=recent_bias_names[-policy.recent_bias_window:],
+            exclude_families=[current_bias_name] + active_families,
+        )
         new_assignments[island_id] = fresh
 
     return retired, new_assignments

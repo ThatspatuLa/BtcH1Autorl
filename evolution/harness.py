@@ -318,6 +318,18 @@ class EvolutionHarness:
         retired_records: list[Any] = []
         bias_overrides: dict[int, str] = {}
 
+        # Build active families list — names of all currently-active islands.
+        # When an island retires, its replacement MUST be a different family
+        # (Six's directive 2026-06-25: "replacement should be a NEW family").
+        # We exclude the retiring island's own current bias AND all other
+        # active islands' biases to prevent duplicate families.
+        def _active_family_names(excluding_iid: int) -> list[str]:
+            return [
+                b.get("name", "")
+                for iid, b in self._island_family_bias.items()
+                if iid != excluding_iid and b.get("name")
+            ]
+
         for iid in to_force_retire:
             # Get the elites for this island (same logic as _check_retirement)
             elites: list[tuple[Any, float]] = []
@@ -331,10 +343,14 @@ class EvolutionHarness:
                     elites.append((cand, entry["discovery_fitness"]))
 
             if not elites:
-                # Nothing to archive — just re-seed and reset counters
+                # Nothing to archive — just re-seed and reset counters.
+                # Pick a NEW family (not the current one, not any active one).
+                current_bias_name = self._island_family_bias.get(iid, {}).get("name", "")
+                active = _active_family_names(iid)
                 fresh = pick_fresh_bias(
                     rng,
                     exclude_recent=self._recent_bias_names[-policy.recent_bias_window:],
+                    exclude_families=[current_bias_name] + active,
                 )
                 old_name = self._island_family_bias.get(iid, {}).get("name", "?")
                 self._island_family_bias[iid] = fresh
@@ -370,9 +386,13 @@ class EvolutionHarness:
             self._retired_records.append(record)
 
             old_name = bias.get("name", "?")
+            # Pick a NEW family for the replacement island.
+            current_bias_name = bias.get("name", "")
+            active = _active_family_names(iid)
             fresh = pick_fresh_bias(
                 rng,
                 exclude_recent=self._recent_bias_names[-policy.recent_bias_window:],
+                exclude_families=[current_bias_name] + active,
             )
             self._island_family_bias[iid] = fresh
             self._island_best_fitness.pop(iid, None)
