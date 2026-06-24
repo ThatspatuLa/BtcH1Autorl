@@ -304,7 +304,7 @@ if [ -z "$RESUME_FLAG" ]; then
         --retirement-enabled \
         --retirement-threshold 0.75 \
         --checkpoint-interval-min 20 \
-        --force-retire-after-gens 8 \
+        --force-retire-after-gens 15 \
         --force-retire-min-fitness 0.70 \
         >> "$CYCLE_LOG" 2>&1 &
 else
@@ -328,7 +328,7 @@ else
         --retirement-enabled \
         --retirement-threshold 0.75 \
         --checkpoint-interval-min 20 \
-        --force-retire-after-gens 8 \
+        --force-retire-after-gens 15 \
         --force-retire-min-fitness 0.70 \
         >> "$CYCLE_LOG" 2>&1 &
 fi
