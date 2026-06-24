@@ -41,6 +41,7 @@ from evolution.islands import (
     select_migrants,
 )
 from evolution.operators import crossover, mutate, random_candidate_genome
+from evolution.smart_mutator import SmartMutator
 from evolution.persistence import (
     GenerationHistory,
     GenerationRecord,
@@ -946,6 +947,40 @@ class EvolutionHarness:
                 output_dir=self.config.output_dir,
             )
 
+        # 5c) Update per-island intelligence (Pitfall #13, 2026-06-25).
+        #     Each island tracks its own niche fingerprint, correlations, and
+        #     backtest patterns. The smart mutator reads this state next gen
+        #     to bias mutations intelligently per-family.
+        if self.config.island_mode:
+            from evolution.island_intelligence import IslandIntelligenceTracker
+            intel_tracker = IslandIntelligenceTracker(output_dir=self.config.output_dir)
+            # Build elites per island (top-20 by fitness)
+            elites_by_island: dict[int, list[CandidateGenome]] = {}
+            for r in passed:
+                cand = next((c for c in candidates if c.genome_id == r.genome_id), None)
+                if cand is None:
+                    continue
+                iid = get_island_id_for_genome(cand)
+                if iid == 0:
+                    continue
+                elites_by_island.setdefault(iid, []).append(cand)
+            for iid, island_elites in elites_by_island.items():
+                # Sort by fitness, take top 20
+                sorted_elites = sorted(
+                    island_elites,
+                    key=lambda c: next(
+                        (r.discovery_fitness for r in passed if r.genome_id == c.genome_id),
+                        0.0,
+                    ),
+                    reverse=True,
+                )[:20]
+                intel_tracker.update(
+                    island_id=iid,
+                    gen_index=gen_idx,
+                    eval_results=results,
+                    elites=sorted_elites,
+                )
+
         # 6) Retirement check (effective 2026-06-22, Six's plan B extension).
         #    Only fires when retirement_enabled=True. Archives any island whose
         #    per_island_best_fitness crossed the threshold this gen, then marks
@@ -1150,19 +1185,34 @@ class EvolutionHarness:
 
             island_children: list[CandidateGenome] = []
 
+            # Smart mutator for this island (Pitfall #13, 2026-06-25).
+            # Uses island intelligence + family hint to bias mutations
+            # intelligently instead of blind Gaussian noise.
+            from evolution.island_intelligence import IslandIntelligenceTracker
+            intel_tracker = IslandIntelligenceTracker(output_dir=self.config.output_dir)
+            intel = intel_tracker.load(spec.island_id)
+            smart_mut = SmartMutator(
+                island_id=spec.island_id,
+                intelligence=intel,
+                family_hint=None,  # SmartMutator auto-loads via get_hint_for_island
+                mutation_rate=self.config.mutation_rate,
+            )
+
             # Crossover
             for _ in range(n_iso_crossover):
                 if len(elites) < 2:
-                    island_children.append(mutate(elites[0], rng=rng, mutation_rate=self.config.mutation_rate))
+                    island_children.append(
+                        smart_mut.mutate(elites[0], rng=rng)
+                    )
                     continue
                 a = rng.choice(elites)
                 b = rng.choice(elites)
                 island_children.append(crossover(a, b, rng=rng))
 
-            # Mutation
+            # Mutation (smart, family-aware)
             for _ in range(n_iso_mutation):
                 parent = rng.choice(elites)
-                island_children.append(mutate(parent, rng=rng, mutation_rate=self.config.mutation_rate))
+                island_children.append(smart_mut.mutate(parent, rng=rng))
 
             # Random injection (per-island fresh random)
             for _ in range(n_iso_random):
