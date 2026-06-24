@@ -9,12 +9,18 @@
 #   3. Otherwise starts a fresh cycle with full 8-island + retirement flags.
 #   4. Disowns so the parent shell exit doesn't kill the cycle.
 #
-# All flags match Six's policy 2026-06-24:
-#   - 8-island model (--island-mode --n-islands 8)
-#   - Retirement on fitness >= 0.80 (--retirement-enabled --retirement-threshold 0.80)
-#   - Push pressure: random_injection 220 (was 180)
+# All flags match Six's policy 2026-06-25 (cap-10 era + per-island independence):
+#   - 8-island model (--island-mode --n-islands 8) — each evolves its own niche
+#   - Per-island top persistence (Fix 2026-06-25: islands-converged-bug)
+#     Each island loads ITS OWN previous-gen #1 from
+#     best_genomes/per_island_gen_<N>_island_<I>.json, not the global #1.
+#     Prevents premature convergence across the 8 islands.
+#   - Retirement on fitness >= 0.75 (lowered from 0.80 — cap-10 needs more
+#     retirement signal to keep islands evolving independently)
+#   - Push pressure: random_injection 220
 #   - Checkpoints every 20 min
 #   - Force-retire on per-island stagnation after 8 gens (skip if fitness >= 0.70)
+#   - 80 generations + 4h wall time (cap-10 era — proportional to cap bump)
 #
 # Outputs:
 #   /tmp/minato_fast_tick.log          — this script's log
@@ -102,8 +108,8 @@ if [ -z "$RESUME_FLAG" ]; then
     "$PYTHON" -u scripts/run_continuous_evolution.py \
         --experiment-id stage10_continuous \
         --output-dir runs \
-        --max-generations 40 \
-        --wall-time 7200 \
+        --max-generations 80 \
+        --wall-time 14400 \
         --candidates 500 \
         --island-mode \
         --n-islands 8 \
@@ -116,7 +122,7 @@ if [ -z "$RESUME_FLAG" ]; then
         --stagnation-generations 5 \
         --all-rejected-generations 3 \
         --retirement-enabled \
-        --retirement-threshold 0.80 \
+        --retirement-threshold 0.75 \
         --checkpoint-interval-min 20 \
         --force-retire-after-gens 8 \
         --force-retire-min-fitness 0.70 \
@@ -126,8 +132,8 @@ else
     "$PYTHON" -u scripts/run_continuous_evolution.py \
         --experiment-id stage10_continuous \
         $RESUME_FLAG \
-        --max-generations 40 \
-        --wall-time 7200 \
+        --max-generations 80 \
+        --wall-time 14400 \
         --candidates 500 \
         --island-mode \
         --n-islands 8 \
@@ -140,7 +146,7 @@ else
         --stagnation-generations 5 \
         --all-rejected-generations 3 \
         --retirement-enabled \
-        --retirement-threshold 0.80 \
+        --retirement-threshold 0.75 \
         --checkpoint-interval-min 20 \
         --force-retire-after-gens 8 \
         --force-retire-min-fitness 0.70 \

@@ -234,6 +234,50 @@ def save_best_genome(
     _atomic_write(out / f"gen_{generation_index:04d}.json", best_genome_dict)
 
 
+def save_per_island_best_genome(
+    generation_index: int,
+    island_id: int,
+    genome_dict: dict[str, Any],
+    output_dir: str | Path,
+) -> None:
+    """Persist the top-1 genome for a single island this generation.
+
+    Fix (2026-06-25, islands-converged-bug): each island must evolve from
+    ITS OWN previous-gen top, not from the global top. Without this,
+    `_load_per_island_elites` falls back to seeding every island from the
+    same global best_genome and the islands converge.
+
+    File path: best_genomes/per_island_gen_<NNNN>_island_<II>.json
+    """
+    out = Path(output_dir) / "best_genomes"
+    _atomic_write(
+        out / f"per_island_gen_{generation_index:04d}_island_{island_id:02d}.json",
+        genome_dict,
+    )
+
+
+def load_per_island_best_genome(
+    generation_index: int,
+    island_id: int,
+    output_dir: str | Path,
+) -> dict[str, Any] | None:
+    """Load the persisted top-1 genome for a single island from a previous
+    generation. Returns None if the file does not exist (e.g. very first
+    generation, or the island was just re-seeded and has no prior top)."""
+    path = (
+        Path(output_dir)
+        / "best_genomes"
+        / f"per_island_gen_{generation_index:04d}_island_{island_id:02d}.json"
+    )
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def save_rejection_report(
     generation_index: int,
     rejection_reasons: dict[str, int],

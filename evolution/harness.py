@@ -46,8 +46,10 @@ from evolution.persistence import (
     GenerationRecord,
     RunSummary,
     UnfinishedStatus,
+    load_per_island_best_genome,
     save_best_genome,
     save_leaderboard,
+    save_per_island_best_genome,
     save_rejection_report,
     save_run_summary,
     save_state,
@@ -875,6 +877,11 @@ class EvolutionHarness:
         per_island_best_fitness: dict[int, float] = {}
         per_island_best_count: dict[int, int] = {}
         per_island_elite_count: dict[int, int] = {}
+        # Per-island top-1 genome dict (for next-gen seeding). Tracks the
+        # actual CandidateGenome with the highest discovery_fitness per island,
+        # not the global best — Fix (2026-06-25, islands-converged-bug) so each
+        # island evolves from its own prior peak instead of collapsing to one.
+        per_island_best_genome: dict[int, Any] = {}
         for r in passed:
             # Find the genome in the candidates list to read island_id
             cand = next((c for c in candidates if c.genome_id == r.genome_id), None)
@@ -887,6 +894,8 @@ class EvolutionHarness:
             fit = r.discovery_fitness
             if iid not in per_island_best_fitness or fit > per_island_best_fitness[iid]:
                 per_island_best_fitness[iid] = fit
+                # Track the genome object so we can persist it
+                per_island_best_genome[iid] = cand
             per_island_best_count[iid] = per_island_best_count.get(iid, 0) + 1
             if (r in elite_eligible):
                 per_island_elite_count[iid] = per_island_elite_count.get(iid, 0) + 1
@@ -925,6 +934,17 @@ class EvolutionHarness:
                 save_best_genome(gen_idx, best_genome.to_dict(), self.config.output_dir)
         else:
             (Path(self.config.output_dir) / "best_genomes").mkdir(parents=True, exist_ok=True)
+
+        # 5b) Persist per-island top-1 genomes (Fix 2026-06-25).
+        #     Each island must evolve from ITS OWN previous-gen top, not the
+        #     global top. Without this, all islands converge to the same peak.
+        for iid, genome in per_island_best_genome.items():
+            save_per_island_best_genome(
+                generation_index=gen_idx,
+                island_id=iid,
+                genome_dict=genome.to_dict(),
+                output_dir=self.config.output_dir,
+            )
 
         # 6) Retirement check (effective 2026-06-22, Six's plan B extension).
         #    Only fires when retirement_enabled=True. Archives any island whose
@@ -1209,64 +1229,75 @@ class EvolutionHarness:
     ) -> dict[int, list[CandidateGenome]]:
         """Load per-island elites for breeding.
 
-        Currently reads the previous gen's best_genome (single-pop legacy)
-        and uses it as the seed for every island. Migrants from the last
-        migration step are added on top. Future Stage 14 work: persist
-        per-island best_genome files so each island can breed from its
-        own actual #1.
-        """
-        out_dir = Path(self.config.output_dir)
-        best_file = out_dir / "best_genomes" / f"gen_{prev_gen.generation_index:04d}.json"
-        if not best_file.exists():
-            return {}
-        try:
-            best_dict = json.loads(best_file.read_text())
-        except Exception:
-            return {}
+        Fix (2026-06-25, islands-converged-bug): Each island must evolve from
+        ITS OWN previous-gen #1, not the global #1. Previously this function
+        read the global best_genome file and used it as the seed for every
+        island, which caused all 8 islands to converge on the same peak by
+        gen ~10.
 
+        New behavior: load `best_genomes/per_island_gen_<N>_island_<I>.json`
+        for each island 1..N. Migrants from the last migration step are
+        added on top.
+        """
         from genome.schema import CandidateGenome, DcaGenome, TpGenome, ConfirmationIndicator
 
-        try:
-            dca_d = best_dict["dca_genome"]
-            tp_d = best_dict["tp_genome"]
-            # Coerce confirmation_indicators back to enums (JSON round-trip strips them)
-            raw_inds = dca_d.get("confirmation_indicators", [])
-            coerced_inds = []
-            for x in raw_inds:
-                if isinstance(x, str):
-                    try:
-                        coerced_inds.append(ConfirmationIndicator(x))
-                    except ValueError:
-                        pass
-                else:
-                    coerced_inds.append(x)
-            dca = DcaGenome(
-                grid_method=dca_d.get("grid_method", "fixed_pct"),
-                grid_params=dca_d.get("grid_params", {}),
-                allocation_method=dca_d.get("allocation_method", "equal"),
-                allocation_params=dca_d.get("allocation_params", {}),
-                max_dca_layers=dca_d.get("max_dca_layers", 3),
-                confirmation_indicators=coerced_inds,
-                indicator_params=dca_d.get("indicator_params", {}),
-            )
-            tp = TpGenome(
-                exit_method=tp_d.get("exit_method", "fixed"),
-                exit_params=tp_d.get("exit_params", {}),
-            )
-            best = CandidateGenome(
-                genome_id=best_dict.get("genome_id", f"genome_G{prev_gen.generation_index}_best"),
-                dca_genome=dca,
-                tp_genome=tp,
-            )
-        except Exception:
-            return {}
+        def _hydrate(best_dict: dict[str, Any]) -> CandidateGenome | None:
+            try:
+                dca_d = best_dict["dca_genome"]
+                tp_d = best_dict["tp_genome"]
+                raw_inds = dca_d.get("confirmation_indicators", [])
+                coerced_inds = []
+                for x in raw_inds:
+                    if isinstance(x, str):
+                        try:
+                            coerced_inds.append(ConfirmationIndicator(x))
+                        except ValueError:
+                            pass
+                    else:
+                        coerced_inds.append(x)
+                dca = DcaGenome(
+                    grid_method=dca_d.get("grid_method", "fixed_pct"),
+                    grid_params=dca_d.get("grid_params", {}),
+                    allocation_method=dca_d.get("allocation_method", "equal"),
+                    allocation_params=dca_d.get("allocation_params", {}),
+                    max_dca_layers=dca_d.get("max_dca_layers", 3),
+                    confirmation_indicators=coerced_inds,
+                    indicator_params=dca_d.get("indicator_params", {}),
+                )
+                tp = TpGenome(
+                    exit_method=tp_d.get("exit_method", "fixed"),
+                    exit_params=tp_d.get("exit_params", {}),
+                )
+                return CandidateGenome(
+                    genome_id=best_dict.get("genome_id", f"genome_G{prev_gen.generation_index}_island"),
+                    dca_genome=dca,
+                    tp_genome=tp,
+                )
+            except Exception:
+                return None
 
         result: dict[int, list[CandidateGenome]] = {}
         for iid in range(1, self.config.n_islands + 1):
-            elites = [best]
+            elites: list[CandidateGenome] = []
+            per_island_dict = load_per_island_best_genome(
+                generation_index=prev_gen.generation_index,
+                island_id=iid,
+                output_dir=self.config.output_dir,
+            )
+            if per_island_dict is not None:
+                hydrated = _hydrate(per_island_dict)
+                if hydrated is not None:
+                    elites.append(hydrated)
+            # Add incoming migrants on top
             if hasattr(self, "_incoming_migrants") and self._incoming_migrants:
                 for m in self._incoming_migrants.get(iid, []):
                     elites.append(m)
+            # Fall back to spec seeding if no elites available at all
+            # (e.g. very first generation, or all candidates were rejected)
+            if not elites:
+                # Caller (_generate_next_gen_island) handles this via
+                # _seed_island_via_spec — so we just return empty here.
+                pass
             result[iid] = elites
 
         return result
