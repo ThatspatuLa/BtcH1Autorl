@@ -48,10 +48,30 @@ is_pid_alive() {
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
-# Get total CPU time (user+sys, in seconds) accumulated by a PID
-get_cpu_time() {
+# Get total CPU time (user+sys, in seconds) accumulated by a PID AND all its descendants.
+# This catches multiprocessing Pool workers — the parent may show low CPU% but the
+# workers are doing the real evaluation work.
+get_cpu_time_tree() {
     local pid="$1"
-    ps -p "$pid" -o cputime= 2>/dev/null | awk '{print $1}' | head -1
+    local total=0
+    # Collect all descendants (recursive)
+    local pids="$pid"
+    local new_pids
+    while :; do
+        new_pids=$(pgrep -P $(echo $pids | tr ' ' ',') 2>/dev/null | tr '\n' ' ') || break
+        [ -z "$new_pids" ] && break
+        pids="$pids $new_pids"
+        # Avoid infinite loop if pids don't grow
+        local count=$(echo $pids | wc -w)
+        [ "$count" -gt 200 ] && break
+    done
+    for p in $pids; do
+        local t=$(ps -p "$p" -o cputime= 2>/dev/null | head -1)
+        [ -z "$t" ] && continue
+        local s=$(cputime_to_secs "$t")
+        total=$(( total + s ))
+    done
+    echo "$total"
 }
 
 # Convert cputime format [DD-]HH:MM:SS to total seconds
@@ -146,18 +166,16 @@ if [ "${#RUNNING_PIDS[@]}" -gt 0 ]; then
             fi
         fi
 
-        # Check CPU time accumulation over 60s
-        cpu1=$(get_cpu_time "$pid")
+        # Check CPU time accumulation over 60s — INCLUDES child workers
+        cpu1=$(get_cpu_time_tree "$pid")
         sleep 60
-        cpu2=$(get_cpu_time "$pid")
+        cpu2=$(get_cpu_time_tree "$pid")
 
         if [ -n "$cpu1" ] && [ -n "$cpu2" ]; then
-            cpu1_s=$(cputime_to_secs "$cpu1")
-            cpu2_s=$(cputime_to_secs "$cpu2")
-            cpu_delta=$(( cpu2_s - cpu1_s ))
-            log "tick: pid=$pid cpu_delta over 60s = ${cpu_delta}s"
+            cpu_delta=$(( cpu2 - cpu1 ))
+            log "tick: pid=$pid cpu_tree_delta over 60s = ${cpu_delta}s"
 
-            if [ "$cpu_delta" -lt 1 ]; then
+            if [ "$cpu_delta" -lt 5 ]; then
                 log "tick: STALL DETECTED pid=$pid (cpu_delta=${cpu_delta}s in 60s) — killing"
                 kill -9 "$pid" 2>/dev/null || true
                 sleep 2
