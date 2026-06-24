@@ -880,6 +880,7 @@ class EvolutionHarness:
             per_island_best_fitness=per_island_best_fitness,
             per_island_best_count=per_island_best_count,
             per_island_elite_count=per_island_elite_count,
+            per_island_stagnation_counter=dict(self._island_stagnation_counter),
         )
 
         # 5) Persist per-generation artifacts

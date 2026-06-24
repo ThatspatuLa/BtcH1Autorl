@@ -50,6 +50,9 @@ class GenerationRecord:
     per_island_best_fitness: dict[int, float] = field(default_factory=dict)
     per_island_best_count: dict[int, int] = field(default_factory=dict)
     per_island_elite_count: dict[int, int] = field(default_factory=dict)
+    # Per-island stagnation counter (2026-06-25): {island_id: gens_since_improvement}
+    # Added so the Discord on_gen_end hook can warn before force-retire fires.
+    per_island_stagnation_counter: dict[int, int] = field(default_factory=dict)
     # Retirement (2026-06-22): list of retired-island manifest summaries this gen
     # (filled in by harness when retirement fires). Stored as lightweight dicts
     # to avoid coupling persistence to the retirement module's classes.
@@ -85,6 +88,7 @@ class GenerationRecord:
             per_island_best_fitness={int(k): float(v) for k, v in d.get("per_island_best_fitness", {}).items()},
             per_island_best_count={int(k): int(v) for k, v in d.get("per_island_best_count", {}).items()},
             per_island_elite_count={int(k): int(v) for k, v in d.get("per_island_elite_count", {}).items()},
+            per_island_stagnation_counter={int(k): int(v) for k, v in d.get("per_island_stagnation_counter", {}).items()},
             retired_islands=list(d.get("retired_islands", [])),
             island_bias_overrides={int(k): str(v) for k, v in d.get("island_bias_overrides", {}).items()},
         )

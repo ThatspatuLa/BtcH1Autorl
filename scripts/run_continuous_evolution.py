@@ -425,19 +425,87 @@ def _run_evolution(args: argparse.Namespace) -> int:
                 best_deploy_genome_id = top["genome_id"]
                 send_discord(
                     f"🏆 **New Best Deployment Candidate** (Gen {record.generation_index})\n"
-                    f"Genome: `{top['genome_id']}` | Fitness: {top['deployment_fitness']:.6f}\n"
+                    f"Fitness: {top['deployment_fitness']:.6f} | "
                     f"Consistency: {top['consistency_ratio']:.4f}"
                 )
 
         # Per-generation summary (User directive 2026-06-23: "after every generation").
         # Was previously every-5-gens; switched to every-gen for visibility.
+        # 2026-06-25: enriched with per-island top fitness + stagnation warnings.
+        # Six asked: "what island has the top candidate, and all other islands' top fitness".
+
+        # Build per-island table sorted by best fitness desc
+        island_bias_lookup = {}
+        try:
+            from evolution.islands import get_island_specs
+            for spec in get_island_specs()[:8]:
+                island_bias_lookup[spec.island_id] = spec.name
+        except Exception:
+            pass
+
+        per_island = record.per_island_best_fitness or {}
+        if per_island:
+            # Sort islands by best fitness desc
+            ranked = sorted(per_island.items(), key=lambda kv: kv[1], reverse=True)
+            medals = ["🥇", "🥈", "🥉"]
+            island_lines = []
+            for rank, (iid, fit) in enumerate(ranked):
+                medal = medals[rank] if rank < 3 else "  "
+                bias_name = island_bias_lookup.get(iid, f"island_{iid}")
+                island_lines.append(f"{medal} I{iid} ({bias_name}): {fit:.4f}")
+            island_block = "\n".join(island_lines)
+        else:
+            island_block = "_no per-island data this gen_"
+
+        # Stagnation warnings (force-retire at 8 gens, skip if fitness ≥ 0.70)
+        stagnation = record.per_island_stagnation_counter or {}
+        force_threshold = 8
+        warn_threshold = 5  # warn at 5 gens (3 gens before force-retire)
+        stagnation_warnings = []
+        for iid, counter in sorted(stagnation.items()):
+            island_fit = per_island.get(iid, 0.0)
+            if counter >= force_threshold and island_fit < 0.70:
+                bias_name = island_bias_lookup.get(iid, f"island_{iid}")
+                stagnation_warnings.append(
+                    f"⚠️ I{iid} ({bias_name}): {counter} gens stagnant @ {island_fit:.4f} → force-retire imminent"
+                )
+            elif counter >= warn_threshold:
+                bias_name = island_bias_lookup.get(iid, f"island_{iid}")
+                stagnation_warnings.append(
+                    f"⚡ I{iid} ({bias_name}): {counter} gens stagnant"
+                )
+
+        stagnation_block = ""
+        if stagnation_warnings:
+            stagnation_block = "\n" + "\n".join(stagnation_warnings)
+
+        # Retirement / force-retire events this gen
+        retirement_block = ""
+        if record.retired_islands:
+            ret_lines = []
+            for rec_dict in record.retired_islands:
+                ret_lines.append(
+                    f"🏝️ Archived I{rec_dict.get('island_id', '?')} "
+                    f"({rec_dict.get('bias_name', '?')}): {rec_dict.get('reason', '?')}"
+                )
+            retirement_block = "\n" + "\n".join(ret_lines)
+
+        # New all-time best detection (vs record.best_fitness this gen)
+        new_best_marker = ""
+        if record.best_fitness >= best_deploy_fitness and record.best_fitness > 0:
+            # Treat global best fitness as the marker; only flag if it's a clear jump
+            pass  # we already notify on deployment_pass leaderboard above
+
         send_discord(
-            f"📊 **Gen {record.generation_index} Summary**\n"
+            f"📊 **Gen {record.generation_index} Summary** — Cap 10\n"
             f"Passed: {record.n_passed}/{record.n_candidates} | "
             f"Deploy-passing: {record.n_deployment_passing} | "
-            f"Best fitness: {record.best_fitness:.6f} | "
-            f"Median: {record.median_fitness:.6f}\n"
-            f"Total deploy-passing so far: {n_deploy_passing_total}"
+            f"Best: {record.best_fitness:.6f} | Median: {record.median_fitness:.6f}\n"
+            f"Total deploy-passing so far: {n_deploy_passing_total}\n\n"
+            f"🏝️ **Per-Island Top Fitness:**\n"
+            f"{island_block}"
+            f"{stagnation_block}"
+            f"{retirement_block}"
         )
 
     hooks = HarnessHooks(on_generation_end=on_gen_end)
