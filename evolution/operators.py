@@ -100,11 +100,14 @@ ALLOCATION_DEFAULT_PARAMS: dict[str, dict[str, float]] = {
 # Update this value (and the upper bound of DCA_PARAM_RANGES["max_layers"]) if
 # the policy changes. The defence-in-depth clamp in extract_dca_params_from_genome
 # guarantees the cap is enforced even if upstream mutation paths drift.
-GLOBAL_MAX_DCA_LAYERS: int = 5
+# 2026-06-25: Bumped from 5 -> 10 per Six's directive. Cap-5 era archived to
+# runs/archive/cap5_era/. Testing 80-gen cycles with cap=10 to unlock search
+# space — pre-cap best was 0.7351, cap-5 best plateaued at 0.71.
+GLOBAL_MAX_DCA_LAYERS: int = 10
 
 DCA_PARAM_RANGES: dict[str, tuple[float, float]] = {
     "grid_pct": (0.0025, 0.0125),    # 0.25% – 1.25%
-    "max_layers": (2, GLOBAL_MAX_DCA_LAYERS),  # 2 – 5 layers (policy cap)
+    "max_layers": (2, GLOBAL_MAX_DCA_LAYERS),  # 2 – 10 layers (policy cap)
     "tp_pct": (0.002, 0.010),        # 0.2% – 1.0%
     "cooldown_candles": (0, 12),     # 0 – 12 candles
     "vol_threshold": (1.1, 2.0),     # volatility_high threshold

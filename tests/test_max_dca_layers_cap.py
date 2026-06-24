@@ -40,9 +40,9 @@ from genome.schema import (
 # Source-of-truth tests
 # ============================================================
 
-def test_global_max_dca_layers_is_5():
-    """User directive: max DCA layer = 5."""
-    assert GLOBAL_MAX_DCA_LAYERS == 5
+def test_global_max_dca_layers_is_10():
+    """User directive 2026-06-25: max DCA layer = 10 (was 5)."""
+    assert GLOBAL_MAX_DCA_LAYERS == 10
 
 
 def test_dca_param_ranges_max_layers_upper_bound_matches_cap():
