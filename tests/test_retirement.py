@@ -525,7 +525,8 @@ class TestConfigIntegration:
         from evolution.config import EvolutionConfig
         c = EvolutionConfig()
         assert c.retirement_enabled is False  # off by default
-        assert c.retirement_threshold == 0.80
+        # Pitfall #11 (2026-06-25): threshold default lowered 0.80 → 0.75 for cap-10 era
+        assert c.retirement_threshold == 0.75
         assert c.retirement_archive_dir == "runs/retired_islands"
 
     def test_config_can_enable_retirement(self):

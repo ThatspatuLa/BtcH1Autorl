@@ -66,8 +66,12 @@ class EvolutionConfig:
     # that island's full state is archived to `retirement_archive_dir` and the
     # slot is re-seeded with a fresh family bias from a 16-bias rotation pool.
     # This expands the retired-islands archive over time without ending the run.
+    # 2026-06-25: lowered default 0.80 → 0.75 for cap-10 era (Pitfall #11 recommendation).
+    # Cap-5 era peaked at 0.71; with cap=10 search space expanded, 0.75 is a
+    # reachable threshold that lets the archive grow during early cap-10 cycles.
+    # Bump back to 0.80 once cap-10 fitness crosses 0.75 regularly.
     retirement_enabled: bool = False
-    retirement_threshold: float = 0.80
+    retirement_threshold: float = 0.75
     retirement_archive_dir: str = "runs/retired_islands"
     max_retired_per_cycle: int = 999  # 999 = no cap (default; user can tighten)
     # Checkpoints (every-N-min snapshots for restart safety).
@@ -172,7 +176,7 @@ class EvolutionConfig:
             min_consistency_for_elite=d.get("min_consistency_for_elite", 0.50),
             min_discovery_for_elite=d.get("min_discovery_for_elite", 0.70),
             retirement_enabled=d.get("retirement_enabled", False),
-            retirement_threshold=d.get("retirement_threshold", 0.80),
+            retirement_threshold=d.get("retirement_threshold", 0.75),
             retirement_archive_dir=d.get("retirement_archive_dir", "runs/retired_islands"),
             max_retired_per_cycle=d.get("max_retired_per_cycle", 999),
             checkpoint_interval_minutes=d.get("checkpoint_interval_minutes", 20),

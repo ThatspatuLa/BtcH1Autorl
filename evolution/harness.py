@@ -27,6 +27,7 @@ from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
+import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -154,6 +155,11 @@ class EvolutionHarness:
         # Force-retire log: {island_id: gen_when_force_retired}, so we don't
         # immediately force-retire a freshly re-seeded island.
         self._force_retired_at_gen: dict[int, int] = {}
+        # Any-retirement log (Pitfall #11 fix, 2026-06-25): {island_id: gen_idx}
+        # for islands retired by EITHER path this cycle. Force-retire must skip
+        # islands already retired by the fitness path to prevent duplicate
+        # archive events when both conditions fire on the same island.
+        self._any_retired_at_gen: dict[int, int] = {}
         # Reference to the GenerationHistory object during run(), used by
         # retirement to read per-island history slice.
         self._last_history: Any = None  # type: ignore[name-defined]  # noqa: F821
@@ -287,6 +293,11 @@ class EvolutionHarness:
             last_reseed_gen = self._force_retired_at_gen.get(iid, -999)
             if gen_idx - last_reseed_gen < 3:
                 continue
+            # Skip if already retired by fitness path THIS gen (Pitfall #11 fix):
+            # prevents duplicate archive events when both conditions fire
+            # simultaneously on the same island.
+            if self._any_retired_at_gen.get(iid) == gen_idx:
+                continue
             to_force_retire.append(iid)
 
         if not to_force_retire:
@@ -350,6 +361,7 @@ class EvolutionHarness:
                 per_island_top_fitness=self._island_best_fitness.get(iid, 0.0),
                 elites=elites,
                 generations_evolved=gen_idx + 1,
+                reason="stagnation_force",  # Pitfall #11 fix: distinguish from fitness
             )
             retired_records.append(record)
             self._retired_records.append(record)
@@ -453,7 +465,26 @@ class EvolutionHarness:
             iid = get_island_id_for_genome(cand)
             if iid == 0:
                 continue
+            # Skip islands in grace period (Pitfall #11, 2026-06-25):
+            # prevents immediate re-fire after a recent retirement/reseed.
+            last_reseed_gen = self._force_retired_at_gen.get(iid, -999)
+            if gen_record.generation_index - last_reseed_gen < 3:
+                continue
             elites_by_island.setdefault(iid, []).append((cand, entry["discovery_fitness"]))
+
+        # Also filter gen_record.per_island_best_fitness so islands in grace
+        # aren't even considered for retirement. Mirrors force-retire's behavior.
+        if gen_record.per_island_best_fitness:
+            filtered_pibf = {}
+            for iid, fit in gen_record.per_island_best_fitness.items():
+                last_reseed_gen = self._force_retired_at_gen.get(iid, -999)
+                if gen_record.generation_index - last_reseed_gen < 3:
+                    continue
+                filtered_pibf[iid] = fit
+            # Use filtered dict for the retirement check below
+            gen_record = dataclasses.replace(
+                gen_record, per_island_best_fitness=filtered_pibf
+            )
 
         # Per-island history slice — just the per-island_best_fitness over gens
         per_island_history: dict[int, list[dict]] = {}
@@ -902,6 +933,9 @@ class EvolutionHarness:
         retired_dicts, bias_overrides = self._check_retirement(record, candidates, rng)
         record.retired_islands = retired_dicts
         record.island_bias_overrides = bias_overrides
+        # Track fitness-retired islands so force-retire can skip them
+        for rd in retired_dicts:
+            self._any_retired_at_gen[rd["island_id"]] = gen_idx
 
         # 6b) Force-retire on per-island stagnation (Plan: 2026-06-24, Six).
         #     Fires AFTER fitness-retirement so the priority order is:
@@ -916,6 +950,8 @@ class EvolutionHarness:
             # Merge into the record's retirement lists so it persists + reports
             record.retired_islands.extend(force_dicts)
             record.island_bias_overrides.update(force_bias_overrides)
+            for fd in force_dicts:
+                self._any_retired_at_gen[fd["island_id"]] = gen_idx
 
         return record
 

@@ -148,6 +148,10 @@ class RetiredIslandRecord:
     top_3_elite_fitness: list[float]
     cycle_id: str                               # run-cycle id this came from
     cycle_output_dir: str                       # path to the original output dir
+    # Pitfall #11 (2026-06-25): why this island was retired.
+    # "fitness_threshold" = crossed retirement_threshold
+    # "stagnation_force"   = stagnation_counter >= force_retire_after_gens
+    reason: str = "fitness_threshold"
 
     def to_dict(self) -> dict[str, Any]:
         # Convert tuples to lists for JSON serialization
@@ -225,6 +229,7 @@ def archive_island(
     generations_evolved: int,
     per_island_history: list[dict[str, Any]] | None = None,
     top_n: int = 3,
+    reason: str = "fitness_threshold",  # Pitfall #11: "fitness_threshold" or "stagnation_force"
 ) -> RetiredIslandRecord:
     """Archive one island. Writes manifest + sidecar files. Returns the record.
 
@@ -265,6 +270,7 @@ def archive_island(
         top_3_elite_fitness=[round(f, 6) for _, f in top_3],
         cycle_id=cycle_id,
         cycle_output_dir=cycle_output_dir,
+        reason=reason,
     )
 
     # Write manifest
@@ -379,6 +385,7 @@ def check_for_retirements(
             elites=elites,
             generations_evolved=gen_record.generation_index + 1,
             per_island_history=history,
+            reason="fitness_threshold",
         )
         retired.append(record)
         recent_bias_names.append(bias.get("name", ""))
