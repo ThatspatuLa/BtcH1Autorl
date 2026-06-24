@@ -1,41 +1,40 @@
 #!/usr/bin/env bash
-# minato_fast_tick.sh — Minato Stage 10 evolution tick.
+# minato_fast_tick.sh — Minato Stage 10 evolution tick (cron supervisor).
 #
 # Cron job: ae4894508637 (every 1 minute, no_agent=true).
 # This script is the parent-process supervisor for the evolution cycle.
-# It:
-#   1. Checks if a cycle is already running (lock file + alive PID). If yes, exits.
-#   2. Checks for a recent checkpoint (< 30 min old) → resume in same dir.
-#   3. Otherwise starts a fresh cycle with full 8-island + retirement flags.
-#   4. Disowns so the parent shell exit doesn't kill the cycle.
+# It runs every 1 minute via cron and:
+#   1. Detects if a healthy cycle is already running → exit (do nothing).
+#   2. Detects a stalled cycle (0% CPU both samples, 60s apart) → kill + cooldown.
+#   3. Detects multiple cycle dirs in runs/ → keep newest, kill older.
+#   4. Detects a stale lock (>30 min, no process alive) → remove lock.
+#   5. Respects a respawn cooldown to prevent spawn loops.
+#   6. Resumes from a recent checkpoint (< 30 min) if available.
+#   7. Otherwise starts a fresh cycle with full 8-island + retirement flags.
 #
 # All flags match Six's policy 2026-06-25 (cap-10 era + per-island independence):
 #   - 8-island model (--island-mode --n-islands 8) — each evolves its own niche
-#   - Per-island top persistence (Fix 2026-06-25: islands-converged-bug)
-#     Each island loads ITS OWN previous-gen #1 from
-#     best_genomes/per_island_gen_<N>_island_<I>.json, not the global #1.
-#     Prevents premature convergence across the 8 islands.
-#   - Retirement on fitness >= 0.75 (lowered from 0.80 — cap-10 needs more
-#     retirement signal to keep islands evolving independently)
+#   - Per-island top persistence — each island loads ITS OWN previous-gen #1
+#   - Retirement on fitness >= 0.75 (cap-10 era threshold)
 #   - Push pressure: random_injection 220
 #   - Checkpoints every 20 min
 #   - Force-retire on per-island stagnation after 8 gens (skip if fitness >= 0.70)
-#   - 80 generations + 4h wall time (cap-10 era — proportional to cap bump)
+#   - 80 generations + 4h wall time
 #
 # Outputs:
-#   /tmp/minato_fast_tick.log          — this script's log
-#   /tmp/stage10_cycle_latest.log      — the actual cycle's log
+#   /tmp/minato_fast_tick.log  — this script's log
+#   /tmp/stage10_cycle_latest.log — the actual cycle's log
 #   /home/spatula/Projects/BtcH1Autorl/checkpoints/ — resume snapshots
-#
-# Constants (tweak here, not in cron):
-set -euo pipefail
+set -uo pipefail
 
 PROJECT_DIR="/home/spatula/Projects/BtcH1Autorl"
 LOCK_FILE="${PROJECT_DIR}/runs/evolution.lock"
 LOG_FILE="/tmp/minato_fast_tick.log"
 CYCLE_LOG="/tmp/stage10_cycle_latest.log"
 PYTHON="/home/spatula/freqtrade/.venv/bin/python3"
-CHECKPOINT_RESUME_MAX_AGE_SEC=1800  # 30 min — fresh enough to resume
+CHECKPOINT_RESUME_MAX_AGE_SEC=1800  # 30 min
+RESPAWN_COOLDOWN_FILE="${PROJECT_DIR}/runs/.respawn_cooldown"
+COOLDOWN_SEC=1800  # 30 min after a kill before respawn
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -49,24 +48,157 @@ is_pid_alive() {
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
+# Get total CPU time (user+sys, in seconds) accumulated by a PID
+get_cpu_time() {
+    local pid="$1"
+    ps -p "$pid" -o cputime= 2>/dev/null | awk '{print $1}' | head -1
+}
+
+# Convert cputime format [DD-]HH:MM:SS to total seconds
+cputime_to_secs() {
+    local t="$1"
+    awk -F'[:-]' '
+    NF==4 { d=$1; h=$2; m=$3; s=$4 }
+    NF==3 { d=0; h=$1; m=$2; s=$3 }
+    { print d*86400 + h*3600 + m*60 + s }
+    ' <<< "$t" 2>/dev/null
+}
+
+# Get the timestamp of the last log line written by the cycle process.
+# Returns seconds-since-epoch, or 0 if unknown.
+last_cycle_log_age() {
+    local cycle_dir="$1"
+    local log="${cycle_dir}/cycle.log"
+    [ -f "$log" ] || return 0
+    local last_line
+    last_line=$(tail -n 100 "$log" | grep -E '^\[[0-9]{4}-[0-9]{2}-[0-9]{2}' | tail -1)
+    [ -z "$last_line" ] && return 0
+    local ts
+    ts=$(echo "$last_line" | head -1 | sed -E 's/^\[([^]]+)\].*/\1/')
+    local epoch
+    epoch=$(date -d "$ts" +%s 2>/dev/null) || return 0
+    echo $(( $(date +%s) - epoch ))
+}
+
 # ---------------------------------------------------------------------------
-# Step 1 — is a cycle already running?
+# SAFEGUARD 1 — Respawn cooldown (after a recent kill)
 # ---------------------------------------------------------------------------
-if [ -f "$LOCK_FILE" ]; then
-    existing_pid="$(cat "$LOCK_FILE" 2>/dev/null || true)"
-    if is_pid_alive "$existing_pid"; then
-        # Healthy — cycle is running, nothing to do
-        log "tick: cycle already running (pid=$existing_pid), exit"
+if [ -f "$RESPAWN_COOLDOWN_FILE" ]; then
+    cooldown_age=$( (cd "$PROJECT_DIR" && "$PYTHON" -c "
+import time
+print(int(time.time() - float(open('$RESPAWN_COOLDOWN_FILE').read().strip() or 0)))
+" 2>/dev/null) || echo "999999")
+    if [ "$cooldown_age" -lt "$COOLDOWN_SEC" ]; then
+        log "tick: in respawn cooldown (${cooldown_age}s/${COOLDOWN_SEC}s), skip"
         exit 0
     else
-        # Stale lock — previous cycle crashed
-        log "tick: stale lock detected (pid=$existing_pid dead), removing"
-        rm -f "$LOCK_FILE"
+        log "tick: respawn cooldown expired (${cooldown_age}s), removing"
+        rm -f "$RESPAWN_COOLDOWN_FILE"
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Step 2 — resume from latest checkpoint if recent enough
+# SAFEGUARD 2 — Multiple cycles in runs/ → keep newest, kill older
+# ---------------------------------------------------------------------------
+mapfile -t CYCLE_DIRS < <(find "${PROJECT_DIR}/runs" -maxdepth 1 -type d -name "evo_continuous_*" 2>/dev/null | sort)
+if [ "${#CYCLE_DIRS[@]}" -gt 1 ]; then
+    newest="${CYCLE_DIRS[-1]}"
+    log "tick: ${#CYCLE_DIRS[@]} cycle dirs found, killing all but newest: $(basename "$newest")"
+    for dir in "${CYCLE_DIRS[@]}"; do
+        if [ "$dir" != "$newest" ]; then
+            log "tick: killing old cycle dir: $(basename "$dir")"
+            # Find PIDs with cwd in this dir or matching the cycle log path
+            for pid in $(pgrep -f "run_continuous_evolution" 2>/dev/null || true); do
+                pid_cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+                if [[ "$pid_cwd" == "$dir" ]] || [[ "$pid_cwd" == "${dir}/" ]]; then
+                    log "tick: kill -9 $pid (cwd=$pid_cwd)"
+                    kill -9 "$pid" 2>/dev/null || true
+                fi
+            done
+        fi
+    done
+    sleep 2
+fi
+
+# ---------------------------------------------------------------------------
+# SAFEGUARD 3 — Single-cycle health check
+# ---------------------------------------------------------------------------
+# Find any running evolution process and check health.
+RUNNING_PIDS=()
+while IFS= read -r pid; do
+    RUNNING_PIDS+=("$pid")
+done < <(pgrep -f "run_continuous_evolution" 2>/dev/null || true)
+
+if [ "${#RUNNING_PIDS[@]}" -gt 0 ]; then
+    for pid in "${RUNNING_PIDS[@]}"; do
+        pid_cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+        # Skip if this is an ancestor shell of our own script
+        [ "$pid" = "$$" ] && continue
+        [ "$pid" = "$PPID" ] && continue
+
+        # Check uptime of the process — if < 5 min, give it time
+        proc_start=$(stat -c %Y "/proc/$pid" 2>/dev/null || echo 0)
+        if [ "$proc_start" -gt 0 ]; then
+            proc_age=$(( $(date +%s) - proc_start ))
+            if [ "$proc_age" -lt 300 ]; then
+                log "tick: cycle pid=$pid is young (${proc_age}s), give it time"
+                exit 0
+            fi
+        fi
+
+        # Check CPU time accumulation over 60s
+        cpu1=$(get_cpu_time "$pid")
+        sleep 60
+        cpu2=$(get_cpu_time "$pid")
+
+        if [ -n "$cpu1" ] && [ -n "$cpu2" ]; then
+            cpu1_s=$(cputime_to_secs "$cpu1")
+            cpu2_s=$(cputime_to_secs "$cpu2")
+            cpu_delta=$(( cpu2_s - cpu1_s ))
+            log "tick: pid=$pid cpu_delta over 60s = ${cpu_delta}s"
+
+            if [ "$cpu_delta" -lt 1 ]; then
+                log "tick: STALL DETECTED pid=$pid (cpu_delta=${cpu_delta}s in 60s) — killing"
+                kill -9 "$pid" 2>/dev/null || true
+                sleep 2
+                rm -f "$LOCK_FILE"
+                date +%s > "$RESPAWN_COOLDOWN_FILE"
+                log "tick: respawn cooldown started (${COOLDOWN_SEC}s)"
+                exit 0
+            fi
+        fi
+
+        # Process is healthy — nothing to do
+        log "tick: cycle pid=$pid healthy (cpu_delta=${cpu_delta:-?}s), exit"
+        exit 0
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# SAFEGUARD 4 — Stale lock cleanup
+# ---------------------------------------------------------------------------
+if [ -f "$LOCK_FILE" ]; then
+    lock_mtime=$(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0)
+    if [ "$lock_mtime" -gt 0 ]; then
+        lock_age=$(( $(date +%s) - lock_mtime ))
+        if [ "$lock_age" -gt 1800 ]; then
+            log "tick: stale lock detected (age=${lock_age}s), removing"
+            rm -f "$LOCK_FILE"
+        else
+            existing_pid="$(cat "$LOCK_FILE" 2>/dev/null || true)"
+            if ! is_pid_alive "$existing_pid"; then
+                log "tick: lock with dead pid ($existing_pid), removing"
+                rm -f "$LOCK_FILE"
+            else
+                log "tick: lock held by live pid=$existing_pid (age=${lock_age}s)"
+                exit 0
+            fi
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step — resume from latest checkpoint if recent enough
 # ---------------------------------------------------------------------------
 RESUME_FLAG=""
 LATEST_CK="${PROJECT_DIR}/checkpoints/latest.json"
@@ -78,7 +210,6 @@ with open('$LATEST_CK') as f:
 print(int(time.time() - float(d.get('saved_at', 0.0))))
 " 2>/dev/null) || echo "999999")
     if [ "$ck_age" -lt "$CHECKPOINT_RESUME_MAX_AGE_SEC" ]; then
-        # Recent — resume in same cycle dir
         ck_cycle=$( (cd "$PROJECT_DIR" && "$PYTHON" -c "
 import json
 with open('$LATEST_CK') as f:
@@ -88,7 +219,7 @@ print(d.get('cycle_id', ''))
         if [ -n "$ck_cycle" ]; then
             resume_dir="${PROJECT_DIR}/runs/evo_continuous_${ck_cycle}"
             if [ -d "$resume_dir" ]; then
-                log "tick: resuming checkpointed cycle $ck_cycle (age=${ck_age}s, dir=$resume_dir)"
+                log "tick: resuming checkpointed cycle $ck_cycle (age=${ck_age}s)"
                 RESUME_FLAG="--output-dir ${resume_dir}"
             fi
         fi
@@ -98,12 +229,11 @@ print(d.get('cycle_id', ''))
 fi
 
 # ---------------------------------------------------------------------------
-# Step 3 — spawn the cycle
+# Spawn the cycle
 # ---------------------------------------------------------------------------
 cd "$PROJECT_DIR"
 
 if [ -z "$RESUME_FLAG" ]; then
-    # Fresh cycle — timestamped subdir + latest symlink
     log "tick: starting fresh 8-island cycle"
     "$PYTHON" -u scripts/run_continuous_evolution.py \
         --experiment-id stage10_continuous \
