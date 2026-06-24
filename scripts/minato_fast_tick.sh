@@ -118,8 +118,11 @@ print(int(time.time() - float(open('$RESPAWN_COOLDOWN_FILE').read().strip() or 0
 fi
 
 # ---------------------------------------------------------------------------
-# SAFEGUARD 2 — Multiple cycles in runs/ → keep newest, kill older
+# SAFEGUARD 2 — Multiple cycles in runs/ → kill duplicate PIDs
 # ---------------------------------------------------------------------------
+# This catches two cases:
+#   A. Multiple cycle dirs in runs/ (kill old dirs + their PIDs)
+#   B. Multiple evolution processes running at the same time (regardless of cwd)
 mapfile -t CYCLE_DIRS < <(find "${PROJECT_DIR}/runs" -maxdepth 1 -type d -name "evo_continuous_*" 2>/dev/null | sort)
 if [ "${#CYCLE_DIRS[@]}" -gt 1 ]; then
     newest="${CYCLE_DIRS[-1]}"
@@ -127,7 +130,6 @@ if [ "${#CYCLE_DIRS[@]}" -gt 1 ]; then
     for dir in "${CYCLE_DIRS[@]}"; do
         if [ "$dir" != "$newest" ]; then
             log "tick: killing old cycle dir: $(basename "$dir")"
-            # Find PIDs with cwd in this dir or matching the cycle log path
             for pid in $(pgrep -f "run_continuous_evolution" 2>/dev/null || true); do
                 pid_cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
                 if [[ "$pid_cwd" == "$dir" ]] || [[ "$pid_cwd" == "${dir}/" ]]; then
@@ -136,6 +138,36 @@ if [ "${#CYCLE_DIRS[@]}" -gt 1 ]; then
                 fi
             done
         fi
+    done
+    sleep 2
+fi
+
+# Case B: count currently-running evolution processes. If >1, keep the NEWEST
+# (highest start time / highest PID) and kill the rest. This handles the case
+# where two cycles were spawned with the same `--output-dir runs` (same cwd)
+# so safeguard 2A above couldn't distinguish them.
+mapfile -t ALL_PIDS < <(pgrep -f "run_continuous_evolution" 2>/dev/null || true)
+if [ "${#ALL_PIDS[@]}" -gt 1 ]; then
+    log "tick: ${#ALL_PIDS[@]} evolution processes running concurrently — killing older ones"
+    # Find the NEWEST PID (highest start time)
+    newest_pid=""
+    newest_start=0
+    for pid in "${ALL_PIDS[@]}"; do
+        [ "$pid" = "$$" ] && continue
+        [ "$pid" = "$PPID" ] && continue
+        ps_start=$(stat -c %Y "/proc/$pid" 2>/dev/null || echo 0)
+        if [ "$ps_start" -gt "$newest_start" ]; then
+            newest_start="$ps_start"
+            newest_pid="$pid"
+        fi
+    done
+    log "tick: keeping newest pid=$newest_pid (started ${newest_start})"
+    for pid in "${ALL_PIDS[@]}"; do
+        [ "$pid" = "$newest_pid" ] && continue
+        [ "$pid" = "$$" ] && continue
+        [ "$pid" = "$PPID" ] && continue
+        log "tick: kill -9 $pid (older duplicate)"
+        kill -9 "$pid" 2>/dev/null || true
     done
     sleep 2
 fi
