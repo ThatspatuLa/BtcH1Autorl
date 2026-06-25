@@ -20,8 +20,9 @@
 #   - Checkpoints every 20 min
 #   - Force-retire on per-island stagnation after 15 gens (Option B 2026-06-25:
 #     no fitness floor — stagnation alone triggers retirement)
-#   - 200 generations + 10h wall time (Six's request 2026-06-25: more headroom)
-#   - 24-bias pool (Six's request: "enough islands in queue")
+#   - 500 generations + 25h wall time (Six's request 2026-06-25 22:24:
+#     bumped from 200/10h mid-run, cycle is on track near record fitness)
+#   - 32-bias pool (Six's request: "enough islands in queue" — expanded from 24)
 #
 # Outputs:
 #   /tmp/minato_fast_tick.log  — this script's log
@@ -314,8 +315,8 @@ if [ -z "$RESUME_FLAG" ]; then
     "$PYTHON" -u scripts/run_continuous_evolution.py \
         --experiment-id stage10_continuous \
         --output-dir runs \
-        --max-generations 200 \
-        --wall-time 36000 \
+        --max-generations 500 \
+        --wall-time 90000 \
         --candidates 500 \
         --island-mode \
         --n-islands 8 \
@@ -338,8 +339,8 @@ else
     "$PYTHON" -u scripts/run_continuous_evolution.py \
         --experiment-id stage10_continuous \
         $RESUME_FLAG \
-        --max-generations 200 \
-        --wall-time 36000 \
+        --max-generations 500 \
+        --wall-time 90000 \
         --candidates 500 \
         --island-mode \
         --n-islands 8 \

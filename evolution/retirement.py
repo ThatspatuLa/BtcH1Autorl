@@ -71,7 +71,37 @@ BIAS_POOL: list[dict[str, Any]] = [
     {"name": "rsi_only", "forced_grid_methods": (GridMethod.RSI_OVERSOLD,), "max_dca_layers_cap": 10},
     {"name": "zscore_only", "forced_grid_methods": (GridMethod.Z_SCORE,), "max_dca_layers_cap": 10},
     {"name": "loose_dca", "max_dca_layers_cap": 10},  # no forced grid — full freedom
-]  # TOTAL: 24 biases (8 active + 16 rotation)
+    # EXPANDED 2026-06-25 2nd pass (Six: "make sure we have enough islands in queue").
+    # Adding 8 more exotic combinations for the 500-gen run. These combine
+    # grid + allocation + confirmation patterns that haven't been explored
+    # in the original 24-bias pool. With 32 biases and 8 active islands,
+    # that's 24 in rotation — enough for ~3 full retirement cycles before
+    # bias reuse becomes a concern.
+    {"name": "vol_confirm_tight", "forced_grid_methods": (GridMethod.VOLATILITY,),
+     "forced_confirmations": (ConfirmationIndicator.VOLATILITY_LOW,),
+     "max_dca_layers_cap": 5},
+    {"name": "dd_confirm_exp", "forced_grid_methods": (GridMethod.DRAWDOWN_FROM_HIGH,),
+     "forced_allocation": AllocationMethod.CONTROLLED_EXP,
+     "max_dca_layers_cap": 10},
+    {"name": "trend_rsi_hybrid", "forced_grid_methods": (GridMethod.MA_DISTANCE,),
+     "forced_confirmations": (ConfirmationIndicator.RSI_BELOW, ConfirmationIndicator.MA_ABOVE),
+     "max_dca_layers_cap": 10},
+    {"name": "atr_linear_tight", "forced_grid_methods": (GridMethod.ATR,),
+     "forced_allocation": AllocationMethod.LINEAR_INCREASING,
+     "max_dca_layers_cap": 5},
+    {"name": "vol_drawdown_combo", "forced_grid_methods": (GridMethod.VOLATILITY, GridMethod.DRAWDOWN_FROM_HIGH),
+     "forced_allocation": AllocationMethod.DRAWDOWN_ADJUSTED,
+     "max_dca_layers_cap": 10},
+    {"name": "zscore_no_confirm", "forced_grid_methods": (GridMethod.Z_SCORE,),
+     "forced_confirmations": (),
+     "max_dca_layers_cap": 10},
+    {"name": "trend_dd_combo", "forced_grid_methods": (GridMethod.TREND_ADJUSTED, GridMethod.DRAWDOWN_FROM_HIGH),
+     "forced_allocation": AllocationMethod.VOLATILITY_ADJUSTED,
+     "max_dca_layers_cap": 10},
+    {"name": "deep_dca_exp", "max_dca_layers_cap": 10,
+     "forced_allocation": AllocationMethod.CONTROLLED_EXP,
+     "forced_grid_methods": (GridMethod.MA_DISTANCE, GridMethod.ATR)},
+]  # TOTAL: 32 biases (8 active + 24 rotation)
 
 
 def pick_fresh_bias(

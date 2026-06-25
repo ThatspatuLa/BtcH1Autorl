@@ -645,6 +645,22 @@ class EvolutionHarness:
             # OLD value in generation_history.json even though self.config has
             # the new value (Pitfall: silent config drift across resumes).
             history.config = self.config.to_dict()
+            # Sync _cycle_id from output dir name (Pitfall: cycle_id mismatch
+            # on resume). When --output-dir is runs/evo_continuous_<ts>, the
+            # original cycle_id is <ts>. Without this sync, _cycle_id is
+            # regenerated as time.strftime() on each Python process start,
+            # causing checkpoints/latest.json to point at a phantom
+            # runs/evo_continuous_<new_ts> dir that doesn't exist → cron
+            # fails to resume → fresh cycle, lost state. 2026-06-25 fix.
+            dir_name = out_dir.name  # e.g. "evo_continuous_20260625_145403"
+            if dir_name.startswith("evo_continuous_"):
+                self._cycle_id = dir_name.replace("evo_continuous_", "", 1)
+                # Also sync any retired_so_far records that still reference
+                # the previous process's cycle_id.
+                for rec in self._retired_records:
+                    if rec.cycle_id != self._cycle_id:
+                        rec.cycle_id = self._cycle_id
+                        rec.retired_at_cycle = self._cycle_id
         else:
             history = GenerationHistory(
                 experiment_id=self.config.experiment_id,

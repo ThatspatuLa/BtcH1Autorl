@@ -201,10 +201,20 @@ class TestBiasPool:
         )
         assert picked["name"] != current_family
         assert picked["name"] not in active_families
-        # Should be one of the 9 unused families
-        expected = {"equal_alloc", "linear_inc_alloc", "dd_adj_alloc",
-                    "rsi_confirm", "ma_confirm", "vol_confirm", "no_confirm",
-                    "trend_only_tight", "atr_low_tp"}
+        # Should be one of the rotation biases (32 total - 8 active = 24 unused)
+        expected = {
+            # Original rotation 9
+            "equal_alloc", "linear_inc_alloc", "dd_adj_alloc",
+            "rsi_confirm", "ma_confirm", "vol_confirm", "no_confirm",
+            "trend_only_tight", "atr_low_tp",
+            # Expansion 1 (2026-06-25)
+            "fixed_pct_tight", "vol_only", "dd_only", "ma_only",
+            "rsi_only", "zscore_only", "loose_dca",
+            # Expansion 2 (2026-06-25 22:30)
+            "vol_confirm_tight", "dd_confirm_exp", "trend_rsi_hybrid",
+            "atr_linear_tight", "vol_drawdown_combo", "zscore_no_confirm",
+            "trend_dd_combo", "deep_dca_exp",
+        }
         assert picked["name"] in expected, (
             f"Picked {picked['name']} but expected one of {expected}"
         )
@@ -481,10 +491,20 @@ class TestCheckForRetirements:
         assert new_family not in active_families, (
             f"Replacement {new_family} duplicates active island"
         )
-        # Should be one of the 9 unused families
-        expected = {"equal_alloc", "linear_inc_alloc", "dd_adj_alloc",
-                    "rsi_confirm", "ma_confirm", "vol_confirm", "no_confirm",
-                    "trend_only_tight", "atr_low_tp"}
+        # Should be one of the rotation biases (32 total - 8 active = 24 unused)
+        expected = {
+            # Original rotation 9
+            "equal_alloc", "linear_inc_alloc", "dd_adj_alloc",
+            "rsi_confirm", "ma_confirm", "vol_confirm", "no_confirm",
+            "trend_only_tight", "atr_low_tp",
+            # Expansion 1 (2026-06-25)
+            "fixed_pct_tight", "vol_only", "dd_only", "ma_only",
+            "rsi_only", "zscore_only", "loose_dca",
+            # Expansion 2 (2026-06-25 22:30)
+            "vol_confirm_tight", "dd_confirm_exp", "trend_rsi_hybrid",
+            "atr_linear_tight", "vol_drawdown_combo", "zscore_no_confirm",
+            "trend_dd_combo", "deep_dca_exp",
+        }
         assert new_family in expected, (
             f"Replacement {new_family} not in expected unused families {expected}"
         )
