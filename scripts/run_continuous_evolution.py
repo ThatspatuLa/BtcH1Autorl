@@ -457,10 +457,13 @@ def _run_evolution(args: argparse.Namespace) -> int:
         else:
             island_block = "_no per-island data this gen_"
 
-        # Stagnation warnings (force-retire at 8 gens, skip if fitness ≥ 0.70)
+        # Stagnation warnings (force-retire threshold from config — was hardcoded 8)
+        # Six's fix 2026-06-25: cron now passes --force-retire-after-gens 15 (was 8).
+        # The threshold must come from config so the warning matches the trigger.
         stagnation = record.per_island_stagnation_counter or {}
-        force_threshold = 8
-        warn_threshold = 5  # warn at 5 gens (3 gens before force-retire)
+        # `config` is in the enclosing main() scope (closure variable)
+        force_threshold = getattr(config, 'force_retire_after_gens', 8)
+        warn_threshold = max(1, force_threshold - 10)  # warn ~10 gens before force-retire
         stagnation_warnings = []
         for iid, counter in sorted(stagnation.items()):
             island_fit = per_island.get(iid, 0.0)

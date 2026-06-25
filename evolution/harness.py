@@ -584,6 +584,12 @@ class EvolutionHarness:
         existing = self._load_history() if resume else None
         if existing is not None:
             history = existing
+            # Sync history.config with current runtime config so the saved file
+            # reflects the LIVE command-line args (e.g. force_retire_after_gens
+            # bumped from 8 → 15). Without this, resumed cycles would show the
+            # OLD value in generation_history.json even though self.config has
+            # the new value (Pitfall: silent config drift across resumes).
+            history.config = self.config.to_dict()
         else:
             history = GenerationHistory(
                 experiment_id=self.config.experiment_id,
@@ -1395,6 +1401,18 @@ class EvolutionHarness:
             base_aggregate_fitness=0.0,
             discovery_fitness=0.0,
             consistency_multiplier=0.0,
+            # Phase C v2 fields (required since discovery_fitness_v2)
+            full_period_base_score=0.0,
+            recovery_score=0.0,
+            stability_score=0.0,
+            concentration_score=0.0,
+            recovery_breakdown={
+                "dd_recovery": 0.0,
+                "dd_depth": 0.0,
+                "dd_duration": 0.0,
+                "time_to_recover": 0.0,
+            },
+            per_month_recovery=[],
             deployment_fitness=0.0,
             deployment_pass=False,
             failed_deployment_gates=["evaluation_error"],
