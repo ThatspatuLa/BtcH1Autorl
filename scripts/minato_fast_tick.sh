@@ -181,6 +181,11 @@ while IFS= read -r pid; do
     RUNNING_PIDS+=("$pid")
 done < <(pgrep -f "run_continuous_evolution" 2>/dev/null || true)
 
+# Also find the bash wrapper (e.g. /usr/bin/bash -lic ... run_continuous_evolution)
+# because the python process is a child of bash, and pgrep -f only matches
+# the python cmdline, not the bash wrapper. But Safeguard 3 operates on
+# python PIDs, so this is fine.
+
 if [ "${#RUNNING_PIDS[@]}" -gt 0 ]; then
     for pid in "${RUNNING_PIDS[@]}"; do
         pid_cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
@@ -188,27 +193,46 @@ if [ "${#RUNNING_PIDS[@]}" -gt 0 ]; then
         [ "$pid" = "$$" ] && continue
         [ "$pid" = "$PPID" ] && continue
 
-        # Check uptime of the process — if < 5 min, give it time
+        # Check uptime of the process — if < 10 min, give it time
+        # (was 5 min, increased to 10 min because gen 0 can take 8-10 min
+        # to bootstrap multiprocessing workers on first launch)
         proc_start=$(stat -c %Y "/proc/$pid" 2>/dev/null || echo 0)
         if [ "$proc_start" -gt 0 ]; then
             proc_age=$(( $(date +%s) - proc_start ))
-            if [ "$proc_age" -lt 300 ]; then
+            if [ "$proc_age" -lt 600 ]; then
                 log "tick: cycle pid=$pid is young (${proc_age}s), give it time"
                 exit 0
             fi
         fi
 
+        # Check wall-time progress via generation_history.json modtime.
+        # If the file was modified within the last 5 min, the cycle is making
+        # progress (gen 0 can take 8-10 min; subsequent gens ~3-5 min).
+        # This is more reliable than CPU sampling because multiprocessing workers
+        # aren't always descendants of the bash wrapper we can see in pgrep.
+        cycle_dir="$pid_cwd"
+        if [ -d "$cycle_dir" ] && [ -f "$cycle_dir/generation_history.json" ]; then
+            history_mtime=$(stat -c %Y "$cycle_dir/generation_history.json" 2>/dev/null || echo 0)
+            if [ "$history_mtime" -gt 0 ]; then
+                history_age=$(( $(date +%s) - history_mtime ))
+                if [ "$history_age" -lt 300 ]; then
+                    log "tick: cycle pid=$pid healthy (history updated ${history_age}s ago)"
+                    exit 0
+                fi
+            fi
+        fi
+
         # Check CPU time accumulation over 60s — INCLUDES child workers
         cpu1=$(get_cpu_time_tree "$pid")
-        sleep 60
+        sleep 120
         cpu2=$(get_cpu_time_tree "$pid")
 
         if [ -n "$cpu1" ] && [ -n "$cpu2" ]; then
             cpu_delta=$(( cpu2 - cpu1 ))
-            log "tick: pid=$pid cpu_tree_delta over 60s = ${cpu_delta}s"
+            log "tick: pid=$pid cpu_tree_delta over 120s = ${cpu_delta}s"
 
-            if [ "$cpu_delta" -lt 5 ]; then
-                log "tick: STALL DETECTED pid=$pid (cpu_delta=${cpu_delta}s in 60s) — killing"
+            if [ "$cpu_delta" -lt 30 ]; then
+                log "tick: STALL DETECTED pid=$pid (cpu_delta=${cpu_delta}s in 120s) — killing"
                 kill -9 "$pid" 2>/dev/null || true
                 sleep 2
                 rm -f "$LOCK_FILE"
