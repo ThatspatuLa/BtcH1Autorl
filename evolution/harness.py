@@ -438,6 +438,42 @@ class EvolutionHarness:
                 bias["max_dca_layers_cap"] = spec.max_dca_layers_cap
             self._island_family_bias[spec.island_id] = bias
 
+    def _build_dynamic_specs(self) -> list:
+        """Build per-island IslandSpec list from _island_family_bias (live state).
+
+        Single source of truth: _island_family_bias[iid] for iid 1..N_islands.
+        Initial values come from static ISLAND_SPECS via _init_island_family_bias(),
+        and are updated by retirement/force-retire to a fresh bias.
+
+        This ensures the per-gen population building honors:
+          - Initial bias (gen 0)
+          - Mid-evolution bias changes (retirement/force-retire)
+          - All post-retirement gens (not just the first gen after retirement)
+
+        Pitfall #13 (2026-06-25): Previously the per-gen population was built
+        from STATIC ISLAND_SPECS (the original 8), which meant retirement bias
+        changes only applied for ONE gen before reverting. This caused all
+        islands to drift back to their original grid_method after the first
+        post-retirement gen and converge on whichever family was winning.
+        """
+        if not self._island_family_bias:
+            self._init_island_family_bias()
+        from evolution.islands import get_island_specs
+        static_specs = get_island_specs()[:self.config.n_islands]
+        dynamic_specs = []
+        for static_spec in static_specs:
+            bias = self._island_family_bias.get(static_spec.island_id)
+            if bias is None:
+                # No bias yet for this island — use static (shouldn't happen post-init)
+                dynamic_specs.append(static_spec)
+            else:
+                dynamic_specs.append(
+                    _make_island_spec_from_bias(
+                        static_spec.island_id, bias, static_spec.n_candidates,
+                    )
+                )
+        return dynamic_specs
+
     def _check_retirement(
         self,
         gen_record: GenerationRecord,
@@ -1165,7 +1201,13 @@ class EvolutionHarness:
 
         Total target = sum across all islands = candidates_per_gen.
         """
-        specs = get_island_specs()[:self.config.n_islands]
+        # Pitfall #13 (2026-06-25): Build specs DYNAMICALLY from _island_family_bias
+        # (the live source of truth) instead of the static ISLAND_SPECS. This ensures
+        # that retirement/force-retire bias changes take effect for ALL post-retirement
+        # gens, not just the first one (the old bias_override block only swapped the
+        # spec for the gen right after retirement, then reverted to static — which let
+        # islands drift back to their original bias after one gen).
+        specs = self._build_dynamic_specs()
 
         # 1. Migration step (every migration_every_n_gens generations)
         if (
@@ -1173,23 +1215,6 @@ class EvolutionHarness:
             and gen_idx - self._last_migration_gen >= self.config.migration_every_n_gens
         ):
             self._do_migration(prev_gen, gen_idx, rng)
-
-        # 1b. Apply retirement bias overrides from previous gen.
-        #     If island X was retired last gen, use the fresh-bias spec instead
-        #     of the static ISLAND_SPECS[X] spec.
-        bias_overrides: dict[int, str] = dict(prev_gen.island_bias_overrides or {})  # type: ignore[arg-type]
-        if bias_overrides:
-            for iid, bias_name in bias_overrides.items():  # type: ignore[union-attr]
-                if 1 <= iid <= len(specs):
-                    bias = self._island_family_bias.get(iid, {})
-                    specs[iid - 1] = _make_island_spec_from_bias(
-                        iid, bias, specs[iid - 1].n_candidates,
-                    )
-                    print(
-                        f"[evo] gen {gen_idx}: island {iid} using fresh bias "
-                        f"'{bias_name}' (post-retirement re-seed)",
-                        flush=True,
-                    )
 
         # 2. Load per-island elites from previous generation's leaderboard
         per_island_elite_genomes = self._load_per_island_elites(prev_gen, gen_idx)
