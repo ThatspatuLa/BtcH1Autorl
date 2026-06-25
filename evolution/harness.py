@@ -1231,6 +1231,31 @@ class EvolutionHarness:
 
             n_iso_total = spec.n_candidates
             n_iso_random = max(2, int(n_iso_total * (self.config.random_injection / self.config.candidates_per_gen)))
+
+            # Quick Win 3 (2026-06-25): Mid-stagnation soft intervention.
+            # When a single island's per-island stagnation counter has reached
+            # the mid_stagnation_threshold (default 8) but not yet
+            # force_retire_after_gens (15), boost that island's random
+            # injection for ONE gen — soft escape attempt before the nuclear
+            # option of force-retire. Capped at n_iso_total so we don't blow
+            # past the per-island allocation.
+            mid_stag_hit = False
+            if (
+                self.config.mid_stagnation_threshold > 0
+                and self.config.mid_stagnation_random_frac > 0
+            ):
+                counter = self._island_stagnation_counter.get(spec.island_id, 0)
+                if counter >= self.config.mid_stagnation_threshold:
+                    boost = int(n_iso_total * self.config.mid_stagnation_random_frac)
+                    if boost > n_iso_random:
+                        n_iso_random = min(boost, n_iso_total)
+                        mid_stag_hit = True
+                        print(
+                            f"[evo] ⚠️  mid-stagnation boost on I{spec.island_id} "
+                            f"(counter={counter}, random_injection={n_iso_random}/{n_iso_total})",
+                            flush=True,
+                        )
+
             n_iso_crossover = int((n_iso_total - n_iso_random) * self.config.crossover_rate)
             n_iso_mutation = (n_iso_total - n_iso_random) - n_iso_crossover
 

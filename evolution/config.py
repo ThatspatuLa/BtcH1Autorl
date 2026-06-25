@@ -84,6 +84,17 @@ class EvolutionConfig:
     # is re-seeded from the bias rotation pool (logged as "stagnation retire").
     force_retire_after_gens: int = 8
     force_retire_min_fitness: float = 0.70  # skip if already near the bar
+    # Quick Win 3 (2026-06-25): Mid-stagnation soft intervention.
+    # When a single island's per-island stagnation counter reaches this
+    # value (but not yet force_retire_after_gens), boost that island's
+    # random_injection for ONE gen — soft escape attempt before force-retire.
+    # 0 = disabled. Default 8 (between stagnation_generations=5 and
+    # force_retire_after_gens=15).
+    mid_stagnation_threshold: int = 8
+    # What fraction of the island's population to replace with random on
+    # mid-stagnation. 0.50 = half. Set to 0 to disable the random boost
+    # (the threshold check still runs but applies no boost).
+    mid_stagnation_random_frac: float = 0.50
 
     def __post_init__(self) -> None:
         if self.candidates_per_gen < 1:
@@ -148,6 +159,8 @@ class EvolutionConfig:
             "checkpoint_interval_minutes": self.checkpoint_interval_minutes,
             "force_retire_after_gens": self.force_retire_after_gens,
             "force_retire_min_fitness": self.force_retire_min_fitness,
+            "mid_stagnation_threshold": self.mid_stagnation_threshold,
+            "mid_stagnation_random_frac": self.mid_stagnation_random_frac,
         }
 
     @classmethod
@@ -182,4 +195,6 @@ class EvolutionConfig:
             checkpoint_interval_minutes=d.get("checkpoint_interval_minutes", 20),
             force_retire_after_gens=d.get("force_retire_after_gens", 8),
             force_retire_min_fitness=d.get("force_retire_min_fitness", 0.70),
+            mid_stagnation_threshold=d.get("mid_stagnation_threshold", 8),
+            mid_stagnation_random_frac=d.get("mid_stagnation_random_frac", 0.50),
         )

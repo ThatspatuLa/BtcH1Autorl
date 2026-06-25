@@ -131,11 +131,34 @@ class BacktestPatterns:
 
     last_updated_gen: int = -1
 
+    # Quick Win 2 (2026-06-25): Lower threshold to len < 2 for faster plateau detection.
+    # With only 1 datapoint we still return "unknown" (no signal).
+    # With 2 datapoints we use simple delta instead of regression slope.
+    MIN_TREND_WINDOW = 2  # was 3 — too slow for our 5-min gens
+    STAGNANT_DELTA = 0.005  # |delta| < this = stagnant
+    IMPROVING_DELTA = 0.010  # delta > this = improving
+    DECLINING_DELTA = -0.010  # delta < this = declining
+
     def trend(self) -> str:
-        """Return 'improving' / 'stagnant' / 'declining' based on recent fitness."""
-        if len(self.recent_best_fitness) < 3:
+        """Return 'improving' / 'stagnant' / 'declining' based on recent fitness.
+
+        QW2 (2026-06-25): Reduced minimum window from 3 → 2 datapoints. With 2
+        points we can't do regression slope, but we can use simple delta which
+        still gives us a signal one gen earlier than waiting for 3 points.
+
+        With 1 datapoint we return 'unknown' (no signal).
+        """
+        if len(self.recent_best_fitness) < self.MIN_TREND_WINDOW:
             return "unknown"
-        # Use a simple linear regression slope over last N
+        # 2-point path: simple delta (faster signal than regression)
+        if len(self.recent_best_fitness) == 2:
+            delta = self.recent_best_fitness[-1] - self.recent_best_fitness[-2]
+            if delta > self.IMPROVING_DELTA:
+                return "improving"
+            elif delta < self.DECLINING_DELTA:
+                return "declining"
+            return "stagnant"
+        # 3+ point path: linear regression slope (original behavior)
         n = len(self.recent_best_fitness)
         xs = list(range(n))
         ys = list(self.recent_best_fitness)

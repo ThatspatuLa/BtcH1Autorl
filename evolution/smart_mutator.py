@@ -488,19 +488,79 @@ class SmartMutator:
             if rng.random() < self.mutation_rate:
                 default_val = float(method_defaults[param_key])
                 current_val = float(new_params.get(param_key, default_val))
-                std_mult = self._param_std_multiplier(param_key, strategy) * zone_std_mult
-                # Pull toward niche centroid if available
-                if (
-                    self.intelligence
-                    and self.intelligence.niche.sample_size >= 5
-                    and param_key in self.intelligence.niche.centroid
-                ):
-                    centroid = self.intelligence.niche.centroid[param_key]
-                    pull_strength = 0.3 if zone == "in_niche" else 0.0
-                    pull = (centroid - current_val) * pull_strength
-                    new_val = current_val + pull + rng.gauss(0, abs(default_val) * 0.20 * std_mult)
+
+                # Quick Win 4 (2026-06-25): Saturated-param force inject.
+                # If a param has zero variance over recent gens (saturated in
+                # correlations), perturbing it won't escape the plateau. Inject
+                # a fresh random value instead. Probability of force-inject =
+                # probability of saturated_params set being non-empty AND
+                # param being saturated.
+                if self._should_force_inject(param_key, rng):
+                    new_val = self._fresh_random_value(param_key, rng)
                 else:
-                    new_val = current_val + rng.gauss(0, abs(default_val) * 0.20 * std_mult)
+                    std_mult = self._param_std_multiplier(param_key, strategy) * zone_std_mult
+                    # Pull toward niche centroid if available
+                    if (
+                        self.intelligence
+                        and self.intelligence.niche.sample_size >= 5
+                        and param_key in self.intelligence.niche.centroid
+                    ):
+                        centroid = self.intelligence.niche.centroid[param_key]
+                        pull_strength = 0.3 if zone == "in_niche" else 0.0
+                        pull = (centroid - current_val) * pull_strength
+                        new_val = current_val + pull + rng.gauss(0, abs(default_val) * 0.20 * std_mult)
+                    else:
+                        new_val = current_val + rng.gauss(0, abs(default_val) * 0.20 * std_mult)
                 new_params[param_key] = new_val
 
         return new_params
+
+    # ============================================================
+    # QW4 helpers — saturated-param force inject
+    # ============================================================
+
+    # Probability of force-inject when param is saturated.
+    # Higher = more aggressive re-randomization. 0.30 = 30% chance per call.
+    FORCE_INJECT_PROBABILITY = 0.30
+
+    def _should_force_inject(self, param_key: str, rng: random.Random) -> bool:
+        """Decide whether to force-inject a fresh random value for a saturated param.
+
+        QW4 (2026-06-25): For params that show zero variance over recent gens
+        (everyone in the population has the same value), Gaussian perturbation
+        can't escape the plateau — the param is locked. Force-inject a fresh
+        random value with FORCE_INJECT_PROBABILITY probability to break out.
+
+        Only fires if:
+          1. Intelligence is loaded
+          2. Param is in saturated_params set (zero variance detected)
+          3. Roll passes FORCE_INJECT_PROBABILITY
+        """
+        if not self.intelligence:
+            return False
+        if param_key not in self.intelligence.correlations.saturated_params:
+            return False
+        return rng.random() < self.FORCE_INJECT_PROBABILITY
+
+    def _fresh_random_value(self, param_key: str, rng: random.Random) -> float:
+        """Generate a fresh random value for a param, respecting its allowed range.
+
+        Looks up the param range from ALLOCATION_PARAM_RANGES or DCA_PARAM_RANGES.
+        Falls back to uniform [0, 1] if range is unknown.
+        """
+        from evolution.operators import (
+            ALLOCATION_PARAM_RANGES,
+            DCA_PARAM_RANGES,
+        )
+        # Try allocation params first (most frozen params in our cycle are
+        # allocation params like multiplier/exponent).
+        for method_key, ranges in ALLOCATION_PARAM_RANGES.items():
+            if param_key in ranges:
+                lo, hi = ranges[param_key]
+                return rng.uniform(lo, hi)
+        # Try DCA params
+        if param_key in DCA_PARAM_RANGES:
+            lo, hi = DCA_PARAM_RANGES[param_key]
+            return rng.uniform(lo, hi)
+        # Fallback — should rarely happen
+        return rng.uniform(0.0, 1.0)
