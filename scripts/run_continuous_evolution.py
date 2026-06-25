@@ -192,7 +192,7 @@ def main() -> int:
         type=int,
         default=8,
         help="Force-retire an island if its top fitness doesn't improve for this many gens "
-             "(default 8). Skip if its top fitness is already >= --force-retire-min-fitness.",
+             "(default 8). [Option B, 2026-06-25: no fitness floor — stagnation alone triggers retirement.]",
     )
     parser.add_argument(
         "--force-retire-min-fitness",

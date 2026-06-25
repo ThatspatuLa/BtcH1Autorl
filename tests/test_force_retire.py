@@ -117,16 +117,26 @@ class TestForceRetireTriggerConditions:
         assert retired == []
         assert overrides == {}
 
-    def test_skipped_when_fitness_above_min(self, mock_harness_factory):
-        """Near-passing islands should be given a chance — don't kill them."""
+    def test_fires_even_when_fitness_above_min(self, mock_harness_factory):
+        """[Option B, 2026-06-25] No fitness floor — stagnation alone triggers retirement.
+
+        Previously, islands above force_retire_min_fitness (default 0.70) were
+        PROTECTED from force-retirement. This caused the 65-gen stagnation bug
+        where 7/8 islands were stuck at fitness 0.70-0.73 but all protected.
+
+        With Option B, the rule is: stagnation_counter >= threshold → retired.
+        Elite islands survive by IMPROVING (resetting their counter), not by
+        being protected.
+        """
         h = mock_harness_factory(force_retire_after_gens=8, force_retire_min_fitness=0.70)
         h._island_stagnation_counter = {0: 100}
-        h._island_best_fitness = {0: 0.75}  # above 0.70
+        h._island_best_fitness = {0: 0.75}  # was "above 0.70 → protected" — NOW: irrelevant
+        h._force_retired_at_gen = {}
         rec = _FakeGenRecord()
         import random
         retired, overrides = h._check_force_retire(rec, 10, [], random.Random())
-        assert retired == []
-        assert overrides == {}
+        # Even at fitness 0.75, stagnation triggers retirement under Option B
+        assert 0 in overrides
 
     def test_skipped_when_recently_reseeded(self, mock_harness_factory):
         """3-gen grace period after a re-seed."""

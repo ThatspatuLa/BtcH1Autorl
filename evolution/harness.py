@@ -251,18 +251,36 @@ class EvolutionHarness:
     ) -> tuple[list[dict], dict[int, str]]:
         """Per-island force-retire: kill dead islands, re-seed from pool.
 
-        Rule (per Six's spec, 2026-06-24):
+        Rule (Six's spec, 2026-06-25, Option B):
             If an island's stagnation_counter >= force_retire_after_gens
-            AND its top fitness is < force_retire_min_fitness
             AND it hasn't been re-seeded in the last 3 gens
             → archive it (reason="stagnation_force") and re-seed with
               a fresh bias from the 17-bias pool.
+
+        CHANGE 2026-06-25 (Option B — drop fitness floor entirely):
+            Previously the rule also required `fitness < force_retire_min_fitness`
+            which protected any island above the floor (default 0.70) from
+            force-retirement. This caused the 65-gen cycle to terminate via
+            system-wide stagnation instead of refreshing niches — 7/8 islands
+            were stagnant at fitness 0.70-0.73 but ALL were protected.
+
+            New behavior: stagnation alone triggers retirement. Elite islands
+            stay elite by IMPROVING (resetting their counter), not by being
+            protected. This guarantees:
+            - Max stagnation window: force_retire_after_gens (default 15)
+            - Always have fresh niches entering the population
+            - System-wide stagnation can only happen if ALL fresh niches
+              also stagnate simultaneously (much harder to achieve)
 
         This complements `_check_stagnation` (which terminates the WHOLE
         run when ALL islands stagnate) and `_check_retirement` (which
         archives on fitness ≥ threshold). Force-retire keeps individual
         dead islands from holding slots while the rest of the population
         is still improving.
+
+        Note: `force_retire_min_fitness` config field is now IGNORED.
+        Kept in config for backwards compatibility (won't break old
+        checkpoint serialization), but has no effect on behavior.
 
         Returns:
             (force_retired_dicts, bias_overrides)
@@ -284,14 +302,15 @@ class EvolutionHarness:
             self._init_island_family_bias()
 
         # Find islands eligible for force-retire
+        # 2026-06-25 (Option B): NO fitness floor check — stagnation alone
+        # triggers retirement. The previous floor protected 7/8 islands
+        # from retirement, causing system-wide stagnation.
         to_force_retire: list[int] = []
         for iid, counter in self._island_stagnation_counter.items():
             if counter < self.config.force_retire_after_gens:
                 continue
-            island_best = self._island_best_fitness.get(iid, 0.0)
-            # Skip if fitness is already near the bar — let it keep trying
-            if island_best >= self.config.force_retire_min_fitness:
-                continue
+            # OPTION B REMOVED: fitness floor check
+            # (Previously: if island_best >= min_fitness: continue)
             # Skip if recently re-seeded (grace period of 3 gens)
             last_reseed_gen = self._force_retired_at_gen.get(iid, -999)
             if gen_idx - last_reseed_gen < 3:

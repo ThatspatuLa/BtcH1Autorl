@@ -78,12 +78,20 @@ class EvolutionConfig:
     # Written to <project_root>/checkpoints/. Default 20 min = ~6 saves per
     # 2h cycle. Set to 0 to disable (not recommended for long runs).
     checkpoint_interval_minutes: int = 20
-    # Force-retire on per-island stagnation (Plan: 2026-06-24, Six).
+    # Force-retire on per-island stagnation (Plan: 2026-06-24, Six;
+    # Updated 2026-06-25 to Option B — drop fitness floor).
     # If an island's per-island best fitness hasn't improved for this many
-    # gens AND its current best is below force_retire_min_fitness, the slot
-    # is re-seeded from the bias rotation pool (logged as "stagnation retire").
+    # gens, the slot is re-seeded from the bias rotation pool (logged as
+    # "stagnation retire"). NO fitness floor — stagnation alone is enough.
+    # Elite islands survive by IMPROVING (resetting their counter), not by
+    # being protected by an absolute threshold.
     force_retire_after_gens: int = 8
-    force_retire_min_fitness: float = 0.70  # skip if already near the bar
+    # DEPRECATED 2026-06-25 (Option B): this field is now IGNORED by
+    # _check_force_retire. Kept for backwards compatibility with checkpoint
+    # serialization. Old behavior protected islands above this floor from
+    # retirement; that caused the 65-gen stagnation bug. New behavior:
+    # stagnation alone triggers retirement.
+    force_retire_min_fitness: float = 0.70  # NO LONGER USED — see docstring
     # Quick Win 3 (2026-06-25): Mid-stagnation soft intervention.
     # When a single island's per-island stagnation counter reaches this
     # value (but not yet force_retire_after_gens), boost that island's
