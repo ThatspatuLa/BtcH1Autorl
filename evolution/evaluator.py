@@ -303,6 +303,18 @@ def _empty_monthly_fitness(candidate_id: str, slug: str) -> MonthlyFitnessResult
         base_aggregate_fitness=0.0,
         discovery_fitness=0.0,
         consistency_multiplier=0.0,
+        # Phase C v2 fields (required since discovery_fitness_v2)
+        full_period_base_score=0.0,
+        recovery_score=0.0,
+        stability_score=0.0,
+        concentration_score=0.0,
+        recovery_breakdown={
+            "dd_recovery": 0.0,
+            "dd_depth": 0.0,
+            "dd_duration": 0.0,
+            "time_to_recover": 0.0,
+        },
+        per_month_recovery=[],
         deployment_fitness=0.0,
         deployment_pass=False,
         failed_deployment_gates=["evaluation_error"],
