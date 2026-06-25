@@ -89,8 +89,8 @@ def grid_fixed_pct(params: dict[str, float], ctx: GridContext) -> float | None:
     return the trigger for the NEXT layer relative to current avg.
     """
     pct = float(params.get("pct", 0.015))
-    if pct <= 0:
-        raise ValueError(f"pct must be > 0, got {pct}")
+    if pct < 1e-4:
+        pct = 1e-4  # floor: smart mutator noise can produce near-zero values
     # The next layer fires when price drops pct below avg_entry
     return ctx.avg_entry * (1.0 - pct)
 
@@ -103,8 +103,8 @@ def grid_atr(params: dict[str, float], ctx: GridContext) -> float | None:
     if ctx.atr is None or ctx.atr <= 0:
         return None
     mult = float(params.get("atr_multiplier", 2.0))
-    if mult <= 0:
-        raise ValueError(f"atr_multiplier must be > 0, got {mult}")
+    if mult < 0.01:
+        mult = 0.01  # floor: smart mutator noise can produce near-zero values
     return ctx.avg_entry - mult * ctx.atr
 
 
@@ -132,8 +132,12 @@ def grid_drawdown_from_high(params: dict[str, float], ctx: GridContext) -> float
     params: { "drawdown_pct": 0.05 } — 5% drawdown from cycle high
     """
     pct = float(params.get("drawdown_pct", 0.05))
-    if pct <= 0:
-        raise ValueError(f"drawdown_pct must be > 0, got {pct}")
+    # Clamp to safe range: smart mutator Gaussian noise can produce
+    # near-zero or negative values; floor to a sane minimum so we don't
+    # emit invalid grid levels. Returns None (no layer) for pathological
+    # inputs that floor can't save.
+    if pct < 1e-4:
+        pct = 1e-4  # floor to 0.01% drawdown (still functional, very tight)
     ref_high = ctx.reference_high if ctx.reference_high is not None else ctx.cycle_high
     if ref_high <= 0:
         return None
@@ -148,8 +152,8 @@ def grid_ma_distance(params: dict[str, float], ctx: GridContext) -> float | None
     if ctx.ma_value is None or ctx.ma_value <= 0:
         return None
     pct = float(params.get("ma_distance_pct", 0.03))
-    if pct <= 0:
-        raise ValueError(f"ma_distance_pct must be > 0, got {pct}")
+    if pct < 1e-4:
+        pct = 1e-4  # floor: smart mutator noise can produce near-zero values
     return ctx.ma_value * (1.0 - pct)
 
 

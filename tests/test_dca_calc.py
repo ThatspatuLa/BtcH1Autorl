@@ -47,10 +47,14 @@ def test_grid_fixed_pct_basic():
     assert price == pytest.approx(98.5)
 
 
-def test_grid_fixed_pct_rejects_zero_pct():
+def test_grid_fixed_pct_clamps_near_zero_pct():
+    # Smart mutator noise can produce near-zero/negative values; grid method
+    # now clamps to a safe floor (1e-4) instead of raising.
     ctx = GridContext(current_price=100, avg_entry=100, cycle_high=100, layers_filled=0, n_layers_total=5)
-    with pytest.raises(ValueError):
-        grid_fixed_pct({"pct": 0.0}, ctx)
+    # Zero → clamped to 1e-4 → trigger ~99.99
+    assert grid_fixed_pct({"pct": 0.0}, ctx) == pytest.approx(99.9999, rel=1e-3)
+    # Negative → clamped to 1e-4
+    assert grid_fixed_pct({"pct": -0.001}, ctx) == pytest.approx(99.9999, rel=1e-3)
 
 
 def test_grid_fixed_pct_uses_avg_entry():
@@ -75,10 +79,14 @@ def test_grid_atr_returns_none_without_atr():
     assert grid_atr({"atr_multiplier": 2.0}, ctx) is None
 
 
-def test_grid_atr_rejects_zero_multiplier():
+def test_grid_atr_clamps_near_zero_multiplier():
+    # Smart mutator noise can produce near-zero/negative multipliers; grid method
+    # now clamps to a safe floor (0.01) instead of raising.
     ctx = GridContext(current_price=100, avg_entry=100, cycle_high=100, layers_filled=0, n_layers_total=5, atr=1.0)
-    with pytest.raises(ValueError):
-        grid_atr({"atr_multiplier": 0.0}, ctx)
+    # Zero → clamped to 0.01 → trigger = 100 - 0.01*1 = 99.99
+    assert grid_atr({"atr_multiplier": 0.0}, ctx) == pytest.approx(99.99)
+    # Negative → clamped to 0.01
+    assert grid_atr({"atr_multiplier": -0.5}, ctx) == pytest.approx(99.99)
 
 
 # ============================================================
