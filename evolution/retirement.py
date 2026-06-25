@@ -50,7 +50,7 @@ BIAS_POOL: list[dict[str, Any]] = [
     {"name": "vola_adj_alloc", "forced_allocation": AllocationMethod.VOLATILITY_ADJUSTED},
     {"name": "ctrl_exp_alloc", "forced_allocation": AllocationMethod.CONTROLLED_EXP},
     {"name": "tight_dca", "max_dca_layers_cap": 8},
-    # New 8 for rotation
+    # Rotation 9 (original 9 — for diversity)
     {"name": "equal_alloc", "forced_allocation": AllocationMethod.EQUAL},
     {"name": "linear_inc_alloc", "forced_allocation": AllocationMethod.LINEAR_INCREASING},
     {"name": "dd_adj_alloc", "forced_allocation": AllocationMethod.DRAWDOWN_ADJUSTED},
@@ -60,7 +60,18 @@ BIAS_POOL: list[dict[str, Any]] = [
     {"name": "no_confirm", "forced_confirmations": ()},
     {"name": "trend_only_tight", "forced_grid_methods": (GridMethod.TREND_ADJUSTED,), "max_dca_layers_cap": 6},
     {"name": "atr_low_tp", "forced_grid_methods": (GridMethod.ATR,), "max_dca_layers_cap": 10},
-]
+    # EXPANDED 2026-06-25 (Six's request: "enough islands in queue").
+    # Added 7 more niche biases for force-retire rotation. With 24 total
+    # biases and 8 active islands, that's 16 in rotation — plenty of fresh
+    # material so the same bias doesn't get re-used too quickly.
+    {"name": "fixed_pct_tight", "forced_grid_methods": (GridMethod.FIXED_PCT,), "max_dca_layers_cap": 6},
+    {"name": "vol_only", "forced_grid_methods": (GridMethod.VOLATILITY,), "max_dca_layers_cap": 10},
+    {"name": "dd_only", "forced_grid_methods": (GridMethod.DRAWDOWN_FROM_HIGH,), "max_dca_layers_cap": 10},
+    {"name": "ma_only", "forced_grid_methods": (GridMethod.MA_DISTANCE,), "max_dca_layers_cap": 10},
+    {"name": "rsi_only", "forced_grid_methods": (GridMethod.RSI_OVERSOLD,), "max_dca_layers_cap": 10},
+    {"name": "zscore_only", "forced_grid_methods": (GridMethod.Z_SCORE,), "max_dca_layers_cap": 10},
+    {"name": "loose_dca", "max_dca_layers_cap": 10},  # no forced grid — full freedom
+]  # TOTAL: 24 biases (8 active + 16 rotation)
 
 
 def pick_fresh_bias(
