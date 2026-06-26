@@ -18,7 +18,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-PYTHON="$PROJECT_ROOT/../freqtrade/.venv/bin/python3"
+PYTHON="/home/spatula/freqtrade/.venv/bin/python3"
 RUNNER="$PROJECT_ROOT/scripts/run_family_hyperopt.py"
 
 # Change to project root

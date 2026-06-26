@@ -36,9 +36,12 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import pandas as pd
+
 from evolution.config import EvolutionConfig
 from evolution.harness import EvolutionHarness
 from evolution.hyperopt_config import (
+    _UNSET,
     PHASE1_EPOCHS_PER_FAMILY,
     PHASE2_EPOCHS_PER_FAMILY,
     PHASE2_MUTATION_RATE,
@@ -96,7 +99,7 @@ def apply_family_constraints(family: FamilySpec) -> None:
     # Convert enum tuples to the format expected by population_builder
     forced_grid = tuple(family.forced_grid_methods) if family.forced_grid_methods else None
     forced_alloc = family.forced_allocation if family.forced_allocation else None
-    forced_conf = tuple(family.forced_confirmations) if family.forced_confirmations else None
+    forced_conf = tuple(family.forced_confirmations) if family.forced_confirmations is not _UNSET else None
 
     set_family_constraints(
         forced_grid_methods=forced_grid,
@@ -110,11 +113,11 @@ def apply_family_constraints(family: FamilySpec) -> None:
 # Phase runners
 # ============================================================
 
-def _run_evolution(config: EvolutionConfig, output_dir: Path) -> dict[str, Any]:
+def _run_evolution(config: EvolutionConfig, output_dir: Path, df: pd.DataFrame) -> dict[str, Any]:
     """Run evolution and return result dict with deployment-passing totals."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    harness = EvolutionHarness(config)
+    harness = EvolutionHarness(config, df)
     summary_obj = harness.run()
     result = summary_obj.to_dict()
 
@@ -133,7 +136,7 @@ def _run_evolution(config: EvolutionConfig, output_dir: Path) -> dict[str, Any]:
     return result
 
 
-def run_phase1_family(family: FamilySpec) -> dict[str, Any]:
+def run_phase1_family(family: FamilySpec, df: pd.DataFrame) -> dict[str, Any]:
     """Run Phase 1 discovery sweep for one family."""
     output_dir = phase1_output_dir(family.name)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -168,7 +171,7 @@ def run_phase1_family(family: FamilySpec) -> dict[str, Any]:
     )
 
     try:
-        result = _run_evolution(config, output_dir)
+        result = _run_evolution(config, output_dir, df)
     finally:
         clear_family_constraints()
 
@@ -185,7 +188,7 @@ def run_phase1_family(family: FamilySpec) -> dict[str, Any]:
         "family_dna": {
             "forced_grid_methods": [g.value for g in family.forced_grid_methods] if family.forced_grid_methods else None,
             "forced_allocation": family.forced_allocation.value if family.forced_allocation else None,
-            "forced_confirmations": [c.value for c in family.forced_confirmations] if family.forced_confirmations else None,
+            "forced_confirmations": [c.value for c in family.forced_confirmations] if family.forced_confirmations is not None and family.forced_confirmations is not _UNSET else None,
             "max_dca_layers_cap": family.max_dca_layers_cap,
         },
         "seed": family.deterministic_seed,
@@ -195,7 +198,7 @@ def run_phase1_family(family: FamilySpec) -> dict[str, Any]:
     return summary
 
 
-def run_phase2_family(family: FamilySpec, phase1_summary: dict[str, Any]) -> dict[str, Any]:
+def run_phase2_family(family: FamilySpec, phase1_summary: dict[str, Any], df: pd.DataFrame) -> dict[str, Any]:
     """Run Phase 2 deep optimisation for one family."""
     output_dir = phase2_output_dir(family.name)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -228,7 +231,7 @@ def run_phase2_family(family: FamilySpec, phase1_summary: dict[str, Any]) -> dic
     )
 
     try:
-        result = _run_evolution(config, output_dir)
+        result = _run_evolution(config, output_dir, df)
     finally:
         clear_family_constraints()
 
@@ -253,6 +256,7 @@ def run_phase2_family(family: FamilySpec, phase1_summary: dict[str, Any]) -> dic
 def run_phase3_combo_iteration(
     combo: dict[str, str],
     iteration: int,
+    df: pd.DataFrame,
     previous_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one Phase 3 combo iteration with smart adjustment."""
@@ -293,7 +297,7 @@ def run_phase3_combo_iteration(
         checkpoint_interval_minutes=20,
     )
 
-    result = _run_evolution(config, output_dir)
+    result = _run_evolution(config, output_dir, df)
 
     summary = {
         "phase": 3,
@@ -437,13 +441,22 @@ def main():
                 print(f"{i+1:2d}. {r['combo']:50s}  fitness={r['best_fitness']:.6f}")
         return
 
+    # Load BTC H1 market data
+    data_path = ROOT / "data" / "processed" / "btc_h1_5y.feather"
+    if not data_path.exists():
+        print(f"ERROR: data file not found: {data_path}")
+        sys.exit(1)
+    print(f"[hyperopt] Loading BTC H1 data: {data_path}")
+    df = pd.read_feather(data_path)
+    print(f"[hyperopt] Loaded {len(df):,} rows")
+
     if args.phase == 1:
         families = {f.name: f for f in build_family_specs()}
         if args.all_families:
             results = []
             for family in families.values():
                 print(f"[Phase 1] Running family: {family.name}")
-                result = run_phase1_family(family)
+                result = run_phase1_family(family, df)
                 results.append(result)
                 print(f"[Phase 1] {family.name}: fitness={result['best_fitness']:.6f}")
             select_top5_families()
@@ -453,7 +466,7 @@ def main():
                 print(f"Unknown family: {args.family}")
                 print(f"Available: {list(families.keys())}")
                 sys.exit(1)
-            result = run_phase1_family(families[args.family])
+            result = run_phase1_family(families[args.family], df)
             print(json.dumps(result, indent=2))
         else:
             print("Specify --family NAME or --all-families")
@@ -472,7 +485,7 @@ def main():
                     continue
                 p1 = phase1_results.get(family_name, {})
                 print(f"[Phase 2] Running deep: {family_name}")
-                result = run_phase2_family(family, p1)
+                result = run_phase2_family(family, p1, df)
                 print(f"[Phase 2] {family_name}: fitness={result['best_fitness']:.6f}  improvement={result.get('fitness_improvement', 0):+.6f}")
             print(f"[Phase 2] Complete.")
         elif args.family:
@@ -483,7 +496,7 @@ def main():
                 print(f"Unknown family: {args.family}")
                 sys.exit(1)
             p1 = phase1_results.get(args.family, {})
-            result = run_phase2_family(family, p1)
+            result = run_phase2_family(family, p1, df)
             print(json.dumps(result, indent=2))
         else:
             print("Specify --family NAME or --all-families")
@@ -500,7 +513,7 @@ def main():
                 print(f"[Phase 3] Running combo: {combo_name}")
                 previous_result = None
                 for iteration in range(1, PHASE3_ITERATIONS_PER_COMBO + 1):
-                    result = run_phase3_combo_iteration(combo, iteration, previous_result)
+                    result = run_phase3_combo_iteration(combo, iteration, df, previous_result)
                     previous_result = result
                     print(f"[Phase 3] {combo_name} iter{iteration:02d}: fitness={result['best_fitness']:.6f}")
                     if result.get("generations_completed", 0) < PHASE3_EPOCHS_PER_ITERATION * 0.5:
@@ -514,7 +527,7 @@ def main():
                 print(f"Available: {[c['name'] for c in combos]}")
                 sys.exit(1)
             combo = matching[0]
-            result = run_phase3_combo_iteration(combo, args.iteration)
+            result = run_phase3_combo_iteration(combo, args.iteration, df)
             print(json.dumps(result, indent=2))
         else:
             print("Specify --family COMBO_NAME or --all-families")
