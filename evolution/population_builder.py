@@ -46,6 +46,88 @@ from evolution.operators import (
     random_candidate_genome,
 )
 
+# ============================================================
+# Family constraints — set externally before hyperopt runs.
+# When active, all population generation respects these bounds.
+# ============================================================
+
+_family_constraints: dict[str, Any] = {}
+
+
+def set_family_constraints(
+    forced_grid_methods: tuple | None = None,
+    forced_allocation: AllocationMethod | None = None,
+    forced_confirmations: tuple | None = None,
+    max_dca_layers_cap: int | None = None,
+) -> None:
+    """Set family DNA constraints for all subsequent population generation.
+
+    Call once before starting an evolution run. Call clear_family_constraints()
+    afterward to restore unconstrained generation.
+    """
+    global _family_constraints
+    _family_constraints = {
+        "forced_grid_methods": forced_grid_methods if forced_grid_methods else None,
+        "forced_allocation": forced_allocation,
+        "forced_confirmations": forced_confirmations if forced_confirmations is not None else None,
+        "max_dca_layers_cap": max_dca_layers_cap,
+    }
+
+
+def clear_family_constraints() -> None:
+    """Clear all family constraints (restore unconstrained generation)."""
+    global _family_constraints
+    _family_constraints = {}
+
+
+def _get_constrained_grid_methods(pool: list[GridMethod]) -> list[GridMethod]:
+    """Return grid methods filtered by family constraints (if active)."""
+    forced = _family_constraints.get("forced_grid_methods")
+    if forced:
+        return [g for g in pool if g in forced]
+    return pool
+
+
+def _get_constrained_allocation() -> tuple[AllocationMethod, dict[str, float]] | None:
+    """Return forced allocation if set, else None."""
+    return None  # handled inline below
+
+
+def _constrained_pick_allocation(rng: random.Random) -> tuple[AllocationMethod, dict[str, float]]:
+    """Pick allocation method, respecting family constraints if active."""
+    forced = _family_constraints.get("forced_allocation")
+    if forced:
+        return forced, _build_allocation_params(rng, forced)
+    return _pick_allocation(rng)
+
+
+def _constrained_pick_confirmations(
+    rng: random.Random,
+    required: list[ConfirmationIndicator] | None = None,
+) -> tuple[list[ConfirmationIndicator], dict[str, dict[str, float]]]:
+    """Pick confirmations, respecting family constraints if active."""
+    forced = _family_constraints.get("forced_confirmations")
+    if forced is not None:
+        indicators = list(forced)
+        params: dict[str, dict[str, float]] = {}
+        for ind in indicators:
+            if ind.value in INDICATOR_DEFAULT_PARAMS:
+                params[ind.value] = dict(INDICATOR_DEFAULT_PARAMS[ind.value])
+                for key in params[ind.value]:
+                    current = params[ind.value][key]
+                    params[ind.value][key] = current + rng.gauss(0, abs(current) * 0.1)
+        return indicators, params
+    return _pick_confirmations(rng, required=required)
+
+
+def _constrained_random_layers(rng: random.Random) -> int:
+    """Pick random max_layers, respecting family cap if active."""
+    cap = _family_constraints.get("max_dca_layers_cap")
+    if cap is not None:
+        lo, _ = DCA_PARAM_RANGES["max_layers"]
+        return rng.randint(int(lo), cap)
+    return _random_layers(rng)
+
 
 def _make_genome_id(generation_index: int, gid: int) -> str:
     return f"genome_G{generation_index}_{gid:06d}"
@@ -230,19 +312,24 @@ def build_exploit_population(
 
     for i in range(n):
         # Grid method: 70% fixed_pct, 15% atr, 15% volatility
-        r = rng.random()
-        if r < 0.70:
-            gm = GridMethod.FIXED_PCT
-        elif r < 0.85:
-            gm = GridMethod.ATR
+        # (constrained to family's forced grid methods if active)
+        forced = _family_constraints.get("forced_grid_methods")
+        if forced:
+            gm = rng.choice(forced)
         else:
-            gm = GridMethod.VOLATILITY
+            r = rng.random()
+            if r < 0.70:
+                gm = GridMethod.FIXED_PCT
+            elif r < 0.85:
+                gm = GridMethod.ATR
+            else:
+                gm = GridMethod.VOLATILITY
 
         gp = _build_grid_params(rng, gm)
         tp = _random_tp(rng)
-        ml = _random_layers(rng)
+        ml = _constrained_random_layers(rng)
         cd = _random_cooldown(rng)
-        am, ap = _pick_allocation(rng)
+        am, ap = _constrained_pick_allocation(rng)
 
         # Confirmations: always volhigh + optional second
         required = [ConfirmationIndicator.VOLATILITY_HIGH]
@@ -252,7 +339,7 @@ def build_exploit_population(
             required.append(ConfirmationIndicator.RSI_BELOW)
         elif r2 < 0.60:
             required.append(ConfirmationIndicator.MA_BELOW)
-        inds, ip = _pick_confirmations(rng, required=required)
+        inds, ip = _constrained_pick_confirmations(rng, required=required)
 
         # Vol threshold: 1.1–2.0 (spec range)
         if "volatility_high" in ip:
@@ -289,14 +376,18 @@ def build_explore_population(
         GridMethod.TREND_ADJUSTED,
         GridMethod.ATR,
     ]
+    # Apply family constraints: filter explore pool to forced methods
+    explore_methods = _get_constrained_grid_methods(explore_methods)
+    if not explore_methods:
+        explore_methods = [GridMethod.FIXED_PCT]  # fallback if constraint eliminates all
 
     for i in range(n):
         gm = rng.choice(explore_methods)
         gp = _build_grid_params(rng, gm)
         tp = _random_tp(rng)
-        ml = _random_layers(rng)
+        ml = _constrained_random_layers(rng)
         cd = _random_cooldown(rng)
-        am, ap = _pick_allocation(rng)
+        am, ap = _constrained_pick_allocation(rng)
 
         # Confirmations: varied, no volhigh bias
         # 30% rsi_below, 20% ma_below, 20% rsi_above, 10% ma_above, 20% volhigh
@@ -312,7 +403,7 @@ def build_explore_population(
             required = [ConfirmationIndicator.MA_ABOVE]
         else:
             required = [ConfirmationIndicator.VOLATILITY_HIGH]
-        inds, ip = _pick_confirmations(rng, required=required)
+        inds, ip = _constrained_pick_confirmations(rng, required=required)
 
         candidates.append(_make_candidate(
             rng, generation_index, gid, gm, gp, tp, ml, cd, am, ap, inds, ip,
@@ -344,18 +435,22 @@ def build_hybrid_population(
         GridMethod.DRAWDOWN_FROM_HIGH,
         GridMethod.TREND_ADJUSTED,
     ]
+    # Apply family constraints
+    constrained_explore = _get_constrained_grid_methods(explore_methods)
+    if not constrained_explore:
+        constrained_explore = [GridMethod.FIXED_PCT]
 
     for i in range(n):
         # Parent A: from exploit pool (volhigh family)
         parent_a = rng.choice(exploit_pool)
 
         # Parent B: new explore-style genome
-        gm = rng.choice(explore_methods)
+        gm = rng.choice(constrained_explore)
         gp = _build_grid_params(rng, gm)
         tp = _random_tp(rng)
-        ml = _random_layers(rng)
+        ml = _constrained_random_layers(rng)
         cd = _random_cooldown(rng)
-        am, ap = _pick_allocation(rng)
+        am, ap = _constrained_pick_allocation(rng)
         r = rng.random()
         required: list[ConfirmationIndicator] = []
         if r < 0.50:
@@ -364,7 +459,7 @@ def build_hybrid_population(
             required = [ConfirmationIndicator.RSI_BELOW]
         else:
             required = [ConfirmationIndicator.MA_BELOW]
-        inds, ip = _pick_confirmations(rng, required=required)
+        inds, ip = _constrained_pick_confirmations(rng, required=required)
         parent_b = _make_candidate(
             rng, generation_index, gid + 10000, gm, gp, tp, ml, cd, am, ap, inds, ip,
         )
@@ -385,7 +480,7 @@ def build_random_population(
     gid_start: int,
     n: int,
 ) -> list[CandidateGenome]:
-    """25 candidates: fresh random valid genomes from the full search space."""
+    """25 candidates: fresh random valid genomes from the (possibly constrained) search space."""
     candidates: list[CandidateGenome] = []
     for i in range(n):
         gid = gid_start + i
@@ -396,6 +491,24 @@ def build_random_population(
             generation_index=generation_index,
             tp_pct=tp,
         )
+        # Apply family constraints post-generation
+        forced_gm = _family_constraints.get("forced_grid_methods")
+        if forced_gm and g.dca_genome.grid_method not in forced_gm:
+            # Re-generate grid params for a valid method
+            new_gm = rng.choice(forced_gm)
+            g.dca_genome.grid_method = new_gm
+            g.dca_genome.grid_params = _build_grid_params(rng, new_gm)
+        forced_alloc = _family_constraints.get("forced_allocation")
+        if forced_alloc and g.dca_genome.allocation_method != forced_alloc:
+            g.dca_genome.allocation_method = forced_alloc
+            g.dca_genome.allocation_params = _build_allocation_params(rng, forced_alloc)
+        forced_conf = _family_constraints.get("forced_confirmations")
+        if forced_conf is not None:
+            g.dca_genome.confirmation_indicators = list(forced_conf)
+        cap = _family_constraints.get("max_dca_layers_cap")
+        if cap is not None:
+            g.dca_genome.max_dca_layers = min(g.dca_genome.max_dca_layers, cap)
+            g.dca_genome.grid_params["max_layers"] = g.dca_genome.max_dca_layers
         # Ensure cooldown is set
         g.dca_genome.grid_params["cooldown_candles"] = _random_cooldown(rng)
         candidates.append(g)
@@ -455,7 +568,7 @@ def _seed_island(
         gp = _build_grid_params(rng, gm, base_pct=base_pct)
 
         # Max layers (apply cap if set)
-        ml = _random_layers(rng)
+        ml = _constrained_random_layers(rng)
         if island_spec.max_dca_layers_cap is not None:
             ml = min(ml, island_spec.max_dca_layers_cap)
 
@@ -467,19 +580,19 @@ def _seed_island(
             am = island_spec.forced_allocation
             ap = _build_allocation_params(rng, am)
         else:
-            am, ap = _pick_allocation(rng)
+            am, ap = _constrained_pick_allocation(rng)
 
         # Confirmations: if forced, use that; otherwise random
         if island_spec.forced_confirmations is not None:
             required = [island_spec.forced_confirmations[rng.randint(0, len(island_spec.forced_confirmations) - 1)]]
-            inds, ip = _pick_confirmations(rng, required=required)
+            inds, ip = _constrained_pick_confirmations(rng, required=required)
         else:
             # No forced confirmations — 40% no confirmations, 60% one random
             r = rng.random()
             if r < 0.40:
                 inds, ip = [], {}
             else:
-                inds, ip = _pick_confirmations(rng, required=None, max_indicators=2)
+                inds, ip = _constrained_pick_confirmations(rng, required=None)
 
         c = _make_candidate(
             rng, generation_index, gid, gm, gp, tp, ml, cd, am, ap, inds, ip,

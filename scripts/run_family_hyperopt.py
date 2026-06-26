@@ -54,7 +54,11 @@ from evolution.hyperopt_config import (
     build_family_specs,
     build_triple_combos,
 )
-from evolution.population_builder import build_population
+from evolution.population_builder import (
+    build_population,
+    set_family_constraints,
+    clear_family_constraints,
+)
 from genome.schema import GridMethod, AllocationMethod, ConfirmationIndicator
 
 
@@ -79,94 +83,37 @@ def phase_summary_path(phase: int) -> Path:
 
 
 # ============================================================
-# Family DNA → PopulationBuilder constraints
+# Family DNA → population builder constraints
 # ============================================================
 
-def apply_family_constraints(
-    family: FamilySpec,
-    base_config: EvolutionConfig,
-) -> EvolutionConfig:
-    """Apply family DNA constraints to the evolution config.
+def apply_family_constraints(family: FamilySpec) -> None:
+    """Set family DNA constraints on the population builder module.
 
-    This forces the population builder to only generate candidates
-    that match the family's DNA axis.
+    This restricts ALL subsequent candidate generation to the family's DNA axis.
+    Must be called before EvolutionHarness.run(). Call clear_family_constraints()
+    after the run completes.
     """
-    # Store constraints on the config for the population builder to read
-    base_config._family_forced_grid_methods = family.forced_grid_methods
-    base_config._family_forced_allocation = family.forced_allocation
-    base_config._family_forced_confirmations = family.forced_confirmations
-    base_config._family_max_dca_layers_cap = family.max_dca_layers_cap
-    return base_config
+    # Convert enum tuples to the format expected by population_builder
+    forced_grid = tuple(family.forced_grid_methods) if family.forced_grid_methods else None
+    forced_alloc = family.forced_allocation if family.forced_allocation else None
+    forced_conf = tuple(family.forced_confirmations) if family.forced_confirmations else None
 
-
-# ============================================================
-# Smart adjustment (Phase 2 & 3)
-# ============================================================
-
-def smart_adjust_ranges(
-    top3_elites: list[dict[str, Any]],
-    current_ranges: dict[str, tuple[float, float]],
-) -> dict[str, tuple[float, float]]:
-    """Tighten mutation ranges to ±20% around median of top-3 elites."""
-    import statistics
-
-    new_ranges = {}
-    for param_name, (lo, hi) in current_ranges.items():
-        elite_vals = []
-        for elite in top3_elites:
-            val = elite.get("params", {}).get(param_name)
-            if val is not None:
-                elite_vals.append(float(val))
-
-        if len(elite_vals) >= 2:
-            center = statistics.median(elite_vals)
-            half_width = center * SMART_ADJUST_TIGHTEN_FACTOR
-            new_lo = max(lo, center - half_width)
-            new_hi = min(hi, center + half_width)
-            new_ranges[param_name] = (new_lo, new_hi)
-        else:
-            new_ranges[param_name] = (lo, hi)
-
-    return new_ranges
+    set_family_constraints(
+        forced_grid_methods=forced_grid,
+        forced_allocation=forced_alloc,
+        forced_confirmations=forced_conf,
+        max_dca_layers_cap=family.max_dca_layers_cap,
+    )
 
 
 # ============================================================
 # Phase runners
 # ============================================================
 
-def run_phase1_family(family: FamilySpec) -> dict[str, Any]:
-    """Run Phase 1 discovery sweep for one family."""
-    output_dir = phase1_output_dir(family.name)
+def _run_evolution(config: EvolutionConfig, output_dir: Path) -> dict[str, Any]:
+    """Run evolution and return result dict with deployment-passing totals."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check if already complete
-    summary_path = output_dir / "run_summary.json"
-    if summary_path.exists():
-        existing = json.loads(summary_path.read_text())
-        if existing.get("status") == "complete":
-            return existing
-
-    config = EvolutionConfig(
-        candidates_per_gen=500,
-        elite_count=20,
-        random_injection=120,
-        mutation_rate=0.30,
-        crossover_rate=0.50,
-        max_generations=PHASE1_EPOCHS_PER_FAMILY,
-        stagnation_generations=5,
-        all_rejected_generations=3,
-        parallel_workers=8,
-        base_seed=family.deterministic_seed,
-        output_dir=str(output_dir),
-        experiment_id=f"hyperopt_p1_{family.name}",
-        island_mode=False,  # single-family run, no islands
-        retirement_enabled=False,
-        force_retire_after_gens=999,  # no force-retire in hyperopt
-        checkpoint_interval_minutes=20,
-    )
-    config = apply_family_constraints(family, config)
-
-    # Run evolution
     harness = EvolutionHarness(config)
     summary_obj = harness.run()
     result = summary_obj.to_dict()
@@ -181,7 +128,50 @@ def run_phase1_family(family: FamilySpec) -> dict[str, Any]:
             total_deploy_passing += gen.get("n_deployment_passing", 0)
             total_passed += gen.get("n_passed", 0)
 
-    # Save summary
+    result["n_deployment_passing"] = total_deploy_passing
+    result["n_passed"] = total_passed
+    return result
+
+
+def run_phase1_family(family: FamilySpec) -> dict[str, Any]:
+    """Run Phase 1 discovery sweep for one family."""
+    output_dir = phase1_output_dir(family.name)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if already complete
+    summary_path = output_dir / "run_summary.json"
+    if summary_path.exists():
+        existing = json.loads(summary_path.read_text())
+        if existing.get("status") == "complete":
+            return existing
+
+    # Set family constraints BEFORE creating config
+    apply_family_constraints(family)
+
+    config = EvolutionConfig(
+        candidates_per_gen=500,
+        elite_count=20,
+        random_injection=120,
+        mutation_rate=0.30,
+        crossover_rate=0.50,
+        max_generations=PHASE1_EPOCHS_PER_FAMILY,
+        stagnation_generations=5,
+        all_rejected_generations=3,
+        parallel_workers=8,
+        base_seed=family.deterministic_seed,
+        output_dir=str(output_dir),
+        experiment_id=f"hyperopt_p1_{family.name}",
+        island_mode=False,
+        retirement_enabled=False,
+        force_retire_after_gens=999,
+        checkpoint_interval_minutes=20,
+    )
+
+    try:
+        result = _run_evolution(config, output_dir)
+    finally:
+        clear_family_constraints()
+
     summary = {
         "phase": 1,
         "family": family.name,
@@ -189,8 +179,8 @@ def run_phase1_family(family: FamilySpec) -> dict[str, Any]:
         "status": "complete",
         "max_generations": PHASE1_EPOCHS_PER_FAMILY,
         "best_fitness": result.get("best_fitness_ever", 0.0),
-        "n_deployment_passing": total_deploy_passing,
-        "n_passed": total_passed,
+        "n_deployment_passing": result.get("n_deployment_passing", 0),
+        "n_passed": result.get("n_passed", 0),
         "generations_completed": result.get("generations_completed", 0),
         "family_dna": {
             "forced_grid_methods": [g.value for g in family.forced_grid_methods] if family.forced_grid_methods else None,
@@ -216,6 +206,8 @@ def run_phase2_family(family: FamilySpec, phase1_summary: dict[str, Any]) -> dic
         if existing.get("status") == "complete":
             return existing
 
+    apply_family_constraints(family)
+
     config = EvolutionConfig(
         candidates_per_gen=500,
         elite_count=20,
@@ -223,7 +215,7 @@ def run_phase2_family(family: FamilySpec, phase1_summary: dict[str, Any]) -> dic
         mutation_rate=PHASE2_MUTATION_RATE,
         crossover_rate=PHASE2_CROSSOVER_RATE,
         max_generations=PHASE2_EPOCHS_PER_FAMILY,
-        stagnation_generations=200,  # much wider window for deep search
+        stagnation_generations=200,
         all_rejected_generations=3,
         parallel_workers=8,
         base_seed=family.deterministic_seed,
@@ -234,21 +226,11 @@ def run_phase2_family(family: FamilySpec, phase1_summary: dict[str, Any]) -> dic
         force_retire_after_gens=999,
         checkpoint_interval_minutes=20,
     )
-    config = apply_family_constraints(family, config)
 
-    harness = EvolutionHarness(config)
-    summary_obj = harness.run()
-    result = summary_obj.to_dict()
-
-    # Sum deployment-passing across all generations
-    history_path = output_dir / "generation_history.json"
-    total_deploy_passing = 0
-    total_passed = 0
-    if history_path.exists():
-        hist = json.loads(history_path.read_text())
-        for gen in hist.get("generations", []):
-            total_deploy_passing += gen.get("n_deployment_passing", 0)
-            total_passed += gen.get("n_passed", 0)
+    try:
+        result = _run_evolution(config, output_dir)
+    finally:
+        clear_family_constraints()
 
     summary = {
         "phase": 2,
@@ -257,8 +239,8 @@ def run_phase2_family(family: FamilySpec, phase1_summary: dict[str, Any]) -> dic
         "status": "complete",
         "max_generations": PHASE2_EPOCHS_PER_FAMILY,
         "best_fitness": result.get("best_fitness_ever", 0.0),
-        "n_deployment_passing": total_deploy_passing,
-        "n_passed": total_passed,
+        "n_deployment_passing": result.get("n_deployment_passing", 0),
+        "n_passed": result.get("n_passed", 0),
         "generations_completed": result.get("generations_completed", 0),
         "phase1_fitness": phase1_summary.get("best_fitness", 0.0),
         "fitness_improvement": result.get("best_fitness_ever", 0.0) - phase1_summary.get("best_fitness", 0.0),
@@ -272,7 +254,7 @@ def run_phase3_combo_iteration(
     combo: dict[str, str],
     iteration: int,
     previous_result: dict[str, Any] | None = None,
-) -> dict[str, None]:
+) -> dict[str, Any]:
     """Run one Phase 3 combo iteration with smart adjustment."""
     combo_name = combo["name"]
     output_dir = phase3_output_dir(combo_name, iteration)
@@ -284,13 +266,14 @@ def run_phase3_combo_iteration(
         if existing.get("status") == "complete":
             return existing
 
-    # Build combo DNA from layer_split
     families_in_combo = combo["families"]
     layer_split = combo.get("layer_split", {})
 
-    # For combo runs, we use a special population builder that
-    # generates multi-layer genomes where each layer group uses
-    # a different family's DNA
+    # For combo runs, we DON'T set family constraints — the combo
+    # inherits DNA from multiple families via layer_split.
+    # The population builder generates full-range candidates,
+    # but the combo mutator (TODO) will respect layer boundaries.
+
     config = EvolutionConfig(
         candidates_per_gen=500,
         elite_count=20,
@@ -310,29 +293,7 @@ def run_phase3_combo_iteration(
         checkpoint_interval_minutes=20,
     )
 
-    # Store combo DNA on config
-    config._combo_families = families_in_combo
-    config._combo_layer_split = layer_split
-    config._combo_iteration = iteration
-
-    # Apply smart adjustment from previous iteration if available
-    if previous_result and "top3_elites" in previous_result:
-        # Tighten ranges based on previous iteration's elites
-        pass  # TODO: implement range tightening in population builder
-
-    harness = EvolutionHarness(config)
-    summary_obj = harness.run()
-    result = summary_obj.to_dict()
-
-    # Sum deployment-passing across all generations
-    history_path = output_dir / "generation_history.json"
-    total_deploy_passing = 0
-    total_passed = 0
-    if history_path.exists():
-        hist = json.loads(history_path.read_text())
-        for gen in hist.get("generations", []):
-            total_deploy_passing += gen.get("n_deployment_passing", 0)
-            total_passed += gen.get("n_passed", 0)
+    result = _run_evolution(config, output_dir)
 
     summary = {
         "phase": 3,
@@ -343,8 +304,8 @@ def run_phase3_combo_iteration(
         "status": "complete",
         "max_generations": PHASE3_EPOCHS_PER_ITERATION,
         "best_fitness": result.get("best_fitness_ever", 0.0),
-        "n_deployment_passing": total_deploy_passing,
-        "n_passed": total_passed,
+        "n_deployment_passing": result.get("n_deployment_passing", 0),
+        "n_passed": result.get("n_passed", 0),
         "generations_completed": result.get("generations_completed", 0),
         "completed_at": time.time(),
     }
@@ -373,7 +334,6 @@ def collect_phase1_results() -> list[dict[str, Any]]:
 def select_top5_families() -> list[str]:
     """Select top-5 families by Phase 1 fitness."""
     results = collect_phase1_results()
-    # Save ranking
     summary_path = phase_summary_path(1)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps({
@@ -480,14 +440,12 @@ def main():
     if args.phase == 1:
         families = {f.name: f for f in build_family_specs()}
         if args.all_families:
-            # Run all families sequentially
             results = []
             for family in families.values():
                 print(f"[Phase 1] Running family: {family.name}")
                 result = run_phase1_family(family)
                 results.append(result)
                 print(f"[Phase 1] {family.name}: fitness={result['best_fitness']:.6f}")
-            # Save ranking
             select_top5_families()
             print(f"[Phase 1] Complete. {len(results)}/{len(families)} families done.")
         elif args.family:
@@ -545,13 +503,11 @@ def main():
                     result = run_phase3_combo_iteration(combo, iteration, previous_result)
                     previous_result = result
                     print(f"[Phase 3] {combo_name} iter{iteration:02d}: fitness={result['best_fitness']:.6f}")
-                    # Check stagnation
                     if result.get("generations_completed", 0) < PHASE3_EPOCHS_PER_ITERATION * 0.5:
                         print(f"[Phase 3] {combo_name} converged early at iter{iteration}")
                         break
             print(f"[Phase 3] Complete.")
         elif args.family:
-            # Find the combo
             matching = [c for c in combos if c["name"] == args.family]
             if not matching:
                 print(f"Unknown combo: {args.family}")
