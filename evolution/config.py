@@ -104,6 +104,17 @@ class EvolutionConfig:
     # (the threshold check still runs but applies no boost).
     mid_stagnation_random_frac: float = 0.50
 
+    # Family-budgeted hyperopt constraints (Phase 1/2/3).
+    # When set, the population builder restricts candidates to this DNA axis.
+    _family_forced_grid_methods: tuple = ()
+    _family_forced_allocation: Any = None
+    _family_forced_confirmations: tuple = ()
+    _family_max_dca_layers_cap: int | None = None
+    # Phase 3 combo DNA
+    _combo_families: list | None = None
+    _combo_layer_split: dict | None = None
+    _combo_iteration: int = 0
+
     def __post_init__(self) -> None:
         if self.candidates_per_gen < 1:
             raise ValueError("candidates_per_gen must be >= 1")

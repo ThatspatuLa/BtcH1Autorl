@@ -70,7 +70,7 @@ class TestComputeDeploymentGates:
             consistency_ratio=0.80,
             max_drawdown_pct=0.20,
             trades_per_month=8.0,
-            total_trades=200,
+            total_trades=300,
             has_invalid_equity=False,
             has_margin_failure=False,
             has_dca_completion_failure=False,
@@ -86,7 +86,7 @@ class TestComputeDeploymentGates:
             consistency_ratio=0.30,
             max_drawdown_pct=0.20,
             trades_per_month=8.0,
-            total_trades=200,
+            total_trades=300,
             has_invalid_equity=False,
             has_margin_failure=False,
             has_dca_completion_failure=False,
@@ -105,7 +105,7 @@ class TestComputeDeploymentGates:
             consistency_ratio=0.80,
             max_drawdown_pct=0.40,  # > 35%
             trades_per_month=8.0,
-            total_trades=200,
+            total_trades=300,
             has_invalid_equity=False,
             has_margin_failure=False,
             has_dca_completion_failure=False,
@@ -119,7 +119,7 @@ class TestComputeDeploymentGates:
             consistency_ratio=0.80,
             max_drawdown_pct=0.20,
             trades_per_month=8.0,
-            total_trades=200,
+            total_trades=300,
             has_invalid_equity=False,
             has_margin_failure=True,
             has_dca_completion_failure=False,
@@ -133,7 +133,7 @@ class TestComputeDeploymentGates:
             consistency_ratio=0.80,
             max_drawdown_pct=0.20,
             trades_per_month=8.0,
-            total_trades=200,
+            total_trades=300,
             has_invalid_equity=False,
             has_margin_failure=False,
             has_dca_completion_failure=True,
@@ -147,7 +147,7 @@ class TestComputeDeploymentGates:
             consistency_ratio=0.80,
             max_drawdown_pct=0.20,
             trades_per_month=8.0,
-            total_trades=200,
+            total_trades=300,
             has_invalid_equity=True,
             has_margin_failure=False,
             has_dca_completion_failure=False,
@@ -161,7 +161,7 @@ class TestComputeDeploymentGates:
             consistency_ratio=0.80,
             max_drawdown_pct=0.20,
             trades_per_month=2.0,  # < 5
-            total_trades=200,
+            total_trades=300,
             has_invalid_equity=False,
             has_margin_failure=False,
             has_dca_completion_failure=False,
@@ -209,7 +209,7 @@ class TestComputeDeploymentGates:
             consistency_ratio=0.80,
             max_drawdown_pct=-1.0,  # not measured
             trades_per_month=8.0,
-            total_trades=200,
+            total_trades=300,
             has_invalid_equity=False,
             has_margin_failure=False,
             has_dca_completion_failure=False,
@@ -230,7 +230,7 @@ class TestClosestToPassingScore:
             consistency_ratio=0.80,
             max_drawdown_pct=0.20,
             trades_per_month=8.0,
-            total_trades=200,
+            total_trades=300,
             has_invalid_equity=False,
             has_margin_failure=False,
             has_dca_completion_failure=False,
@@ -244,7 +244,7 @@ class TestClosestToPassingScore:
             consistency_ratio=0.49,  # just below 0.50
             max_drawdown_pct=0.20,
             trades_per_month=8.0,
-            total_trades=200,
+            total_trades=300,
             has_invalid_equity=False,
             has_margin_failure=False,
             has_dca_completion_failure=False,
@@ -258,7 +258,7 @@ class TestClosestToPassingScore:
             consistency_ratio=0.0,
             max_drawdown_pct=0.20,
             trades_per_month=8.0,
-            total_trades=200,
+            total_trades=300,
             has_invalid_equity=False,
             has_margin_failure=False,
             has_dca_completion_failure=False,
@@ -276,7 +276,7 @@ class TestClosestToPassingScore:
             consistency_ratio=0.80,
             max_drawdown_pct=0.20,
             trades_per_month=8.0,
-            total_trades=200,
+            total_trades=300,
             has_invalid_equity=True,
             has_margin_failure=True,
             has_dca_completion_failure=True,
@@ -336,7 +336,7 @@ def test_constants_locked():
     assert DEPLOYMENT_MIN_CONSISTENCY == 0.50
     assert DEPLOYMENT_MAX_DD_PCT == 0.35
     assert DEPLOYMENT_MIN_TRADES_PER_MONTH == 5.0
-    assert DEPLOYMENT_MIN_TOTAL_TRADES == 30
+    assert DEPLOYMENT_MIN_TOTAL_TRADES == 300
     # Penalty table is the locked 5-band curve
     assert len(CONSISTENCY_PENALTY_TABLE) == 5
     assert CONSISTENCY_PENALTY_TABLE[0] == (0.50, 1.00)
