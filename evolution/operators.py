@@ -27,6 +27,7 @@ from genome.schema import (
     TpGenome,
     TriggerMode,
 )
+from evolution.family_contracts import active_family_contract
 
 # ============================================================
 # Available confirmation indicators for random selection
@@ -327,6 +328,15 @@ def mutate(
     else:
         current_grid_method = raw_gm
 
+    family_contract = active_family_contract()
+    allowed_grid_methods = (
+        tuple(family_contract.forced_grid_methods)
+        if family_contract and family_contract.forced_grid_methods
+        else tuple(ALL_GRID_METHODS)
+    )
+    if current_grid_method not in allowed_grid_methods:
+        current_grid_method = allowed_grid_methods[0]
+
     # --- Allocation method (may be string if loaded from JSON) ---
     raw_am = parent_dca.allocation_method
     if isinstance(raw_am, str):
@@ -340,7 +350,10 @@ def mutate(
     # --- Grid method (rare structural mutation) ---
     new_grid_method = current_grid_method
     if rng.random() < mutation_rate * 0.15:  # 15% of mutation_rate chance
-        new_grid_method = rng.choice(ALL_GRID_METHODS)
+        if not family_contract or family_contract.allow_grid_method_switch:
+            new_grid_method = rng.choice(list(allowed_grid_methods))
+    if new_grid_method not in allowed_grid_methods:
+        new_grid_method = allowed_grid_methods[0]
 
     # --- Grid params ---
     new_grid_params = dict(parent_dca.grid_params)
@@ -359,12 +372,18 @@ def mutate(
     # (e.g. 18 from genome_G1_327669). User directive 2026-06-23: cap at 5.
     current_layers = int(new_grid_params.get("max_layers", parent_dca.max_dca_layers))
     current_layers = min(current_layers, GLOBAL_MAX_DCA_LAYERS)
+    if family_contract and family_contract.max_dca_layers_cap is not None:
+        current_layers = min(current_layers, family_contract.max_dca_layers_cap)
     if rng.random() < mutation_rate:
         lo, hi = DCA_PARAM_RANGES["max_layers"]
+        if family_contract and family_contract.max_dca_layers_cap is not None:
+            hi = min(hi, family_contract.max_dca_layers_cap)
         delta = rng.choice([-2, -1, 1, 2])
         current_layers = max(lo, min(hi, current_layers + delta))
     # Final defensive clamp — never exceeds GLOBAL_MAX_DCA_LAYERS
     current_layers = min(int(current_layers), GLOBAL_MAX_DCA_LAYERS)
+    if family_contract and family_contract.max_dca_layers_cap is not None:
+        current_layers = min(current_layers, family_contract.max_dca_layers_cap)
     new_grid_params["max_layers"] = current_layers
 
     # tp_pct
@@ -414,30 +433,37 @@ def mutate(
                     new_alloc_params[key] = max(lo, min(hi, new_alloc_params[key] + rng.gauss(0, span * 0.15)))
 
     # --- Confirmation indicators ---
-    new_indicators = list(parent_dca.confirmation_indicators)
-    new_ind_params = dict(parent_dca.indicator_params)
-    if rng.random() < mutation_rate * 0.5:  # lower rate for structural changes
-        if new_indicators and rng.random() < 0.5:
-            # Remove one
-            idx = rng.randint(0, len(new_indicators) - 1)
-            removed = new_indicators.pop(idx)
-            new_ind_params.pop(removed.value, None)
-        else:
-            # Add one (not already present)
-            available = [i for i in ALL_CONFIRMATION_INDICATORS if i not in new_indicators]
-            if available and len(new_indicators) < 3:
-                added = rng.choice(available)
-                new_indicators.append(added)
-                if added.value in INDICATOR_DEFAULT_PARAMS:
-                    new_ind_params[added.value] = dict(INDICATOR_DEFAULT_PARAMS[added.value])
+    if family_contract and family_contract.forced_confirmations is not None:
+        new_indicators = list(family_contract.forced_confirmations)
+        new_ind_params: dict[str, dict[str, float]] = {}
+        for ind in new_indicators:
+            if ind.value in INDICATOR_DEFAULT_PARAMS:
+                new_ind_params[ind.value] = dict(INDICATOR_DEFAULT_PARAMS[ind.value])
+    else:
+        new_indicators = list(parent_dca.confirmation_indicators)
+        new_ind_params = dict(parent_dca.indicator_params)
+        if rng.random() < mutation_rate * 0.5:  # lower rate for structural changes
+            if new_indicators and rng.random() < 0.5:
+                # Remove one
+                idx = rng.randint(0, len(new_indicators) - 1)
+                removed = new_indicators.pop(idx)
+                new_ind_params.pop(removed.value, None)
+            else:
+                # Add one (not already present)
+                available = [i for i in ALL_CONFIRMATION_INDICATORS if i not in new_indicators]
+                if available and len(new_indicators) < 3:
+                    added = rng.choice(available)
+                    new_indicators.append(added)
+                    if added.value in INDICATOR_DEFAULT_PARAMS:
+                        new_ind_params[added.value] = dict(INDICATOR_DEFAULT_PARAMS[added.value])
 
-    # Tweak indicator thresholds
-    for ind_name in list(new_ind_params.keys()):
-        if rng.random() < mutation_rate * 0.3:
-            for param_key in new_ind_params[ind_name]:
-                current_val = new_ind_params[ind_name][param_key]
-                std = abs(current_val) * 0.10
-                new_ind_params[ind_name][param_key] = current_val + rng.gauss(0, std)
+        # Tweak indicator thresholds
+        for ind_name in list(new_ind_params.keys()):
+            if rng.random() < mutation_rate * 0.3:
+                for param_key in new_ind_params[ind_name]:
+                    current_val = new_ind_params[ind_name][param_key]
+                    std = abs(current_val) * 0.10
+                    new_ind_params[ind_name][param_key] = current_val + rng.gauss(0, std)
 
     # Build child genome
     new_dca = DcaGenome(
@@ -519,9 +545,21 @@ def crossover(
     b_grid_method = _normalize_grid_method(b_dca.grid_method)
     a_alloc_method = _normalize_alloc_method(a_dca.allocation_method)
     b_alloc_method = _normalize_alloc_method(b_dca.allocation_method)
+    family_contract = active_family_contract()
+    allowed_grid_methods = (
+        tuple(family_contract.forced_grid_methods)
+        if family_contract and family_contract.forced_grid_methods
+        else tuple(ALL_GRID_METHODS)
+    )
+    if a_grid_method not in allowed_grid_methods:
+        a_grid_method = allowed_grid_methods[0]
+    if b_grid_method not in allowed_grid_methods:
+        b_grid_method = allowed_grid_methods[0]
 
     # Grid method: pick from one parent
     new_grid_method = a_grid_method if rng.random() < 0.5 else b_grid_method
+    if new_grid_method not in allowed_grid_methods:
+        new_grid_method = allowed_grid_methods[0]
 
     # Allocation method: pick from one parent
     new_alloc_method = a_alloc_method if rng.random() < 0.5 else b_alloc_method
@@ -563,16 +601,19 @@ def crossover(
         if key in other_alloc and rng.random() < 0.5:
             merged_alloc[key] = float(other_alloc[key])
 
-    # Confirmation indicators: union then sample
-    combined_indicators = list(set(
-        list(a_dca.confirmation_indicators) +
-        list(b_dca.confirmation_indicators)
-    ))
-    n_keep = rng.randint(0, min(3, len(combined_indicators)))
-    if n_keep > 0 and combined_indicators:
-        new_indicators = rng.sample(combined_indicators, k=n_keep)
+    # Confirmation indicators: union then sample, unless a family contract fixes them.
+    if family_contract and family_contract.forced_confirmations is not None:
+        new_indicators = list(family_contract.forced_confirmations)
     else:
-        new_indicators = []
+        combined_indicators = list(set(
+            list(a_dca.confirmation_indicators) +
+            list(b_dca.confirmation_indicators)
+        ))
+        n_keep = rng.randint(0, min(3, len(combined_indicators)))
+        if n_keep > 0 and combined_indicators:
+            new_indicators = rng.sample(combined_indicators, k=n_keep)
+        else:
+            new_indicators = []
 
     # Merge indicator_params
     merged_ind_params: dict[str, dict[str, float]] = {}
@@ -590,6 +631,8 @@ def crossover(
 
     # Final defensive clamp — never exceeds GLOBAL_MAX_DCA_LAYERS.
     max_layers = min(int(merged_grid["max_layers"]), GLOBAL_MAX_DCA_LAYERS)
+    if family_contract and family_contract.max_dca_layers_cap is not None:
+        max_layers = min(max_layers, family_contract.max_dca_layers_cap)
     merged_grid["max_layers"] = max_layers
     tp_pct = float(merged_grid["tp_pct"])
 

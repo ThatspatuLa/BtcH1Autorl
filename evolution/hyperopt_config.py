@@ -1,6 +1,6 @@
 """HyperoptConfig — Stage 10 family-budgeted hyperopt (3-phase).
 
-Phase 1: Discovery sweep — 22 pure-axis families × 500 epochs each.
+Phase 1: Discovery sweep — spacing families × 500 epochs each.
 Phase 2: Deep optimisation — top-5 families × 5,000 epochs each.
 Phase 3: Combo deep-dive — top-10 triples × (10 iterations × 500 epochs).
 
@@ -18,6 +18,7 @@ from genome.schema import (
     ConfirmationIndicator,
     GridMethod,
 )
+from evolution.family_contracts import FamilyMutationContract
 
 
 # ============================================================
@@ -50,7 +51,7 @@ SMART_ADJUST_TIGHTEN_FACTOR: float = 0.20
 
 
 # ============================================================
-# 22 Pure-Axis Families
+# Stage 1 Spacing Families
 # ============================================================
 
 # Sentinel: "not set" vs "explicitly empty"
@@ -59,13 +60,15 @@ _UNSET = object()
 
 @dataclass
 class FamilySpec:
-    """A single DCA family to test in Phase 1."""
+    """A single spacing family to test in Phase 1."""
+
     name: str
     forced_grid_methods: tuple[GridMethod, ...] = ()
     forced_allocation: AllocationMethod | None = None
     forced_confirmations: Any = _UNSET
     max_dca_layers_cap: int | None = None  # if set, overrides GLOBAL_MAX_DCA_LAYERS for this family
     description: str = ""
+    family_kind: str = "spacing"
 
     @property
     def deterministic_seed(self) -> int:
@@ -75,131 +78,138 @@ class FamilySpec:
 
     @property
     def group(self) -> str:
-        if self.forced_allocation is not None and not self.forced_grid_methods:
-            return "allocation"
-        if self.forced_confirmations is not _UNSET:
-            return "confirmation"
-        if self.max_dca_layers_cap is not None and not self.forced_grid_methods:
-            return "depth"
-        return "grid"
+        return self.family_kind
+
+    @property
+    def mutation_contract(self) -> FamilyMutationContract:
+        forced_confirmations = (
+            tuple(self.forced_confirmations)
+            if self.forced_confirmations is not _UNSET
+            else None
+        )
+        return FamilyMutationContract(
+            name=self.name,
+            forced_grid_methods=tuple(self.forced_grid_methods),
+            forced_confirmations=forced_confirmations,
+            allow_grid_method_switch=len(self.forced_grid_methods) > 1,
+            max_dca_layers_cap=self.max_dca_layers_cap,
+            notes=self.description,
+        )
 
 
 def build_family_specs() -> list[FamilySpec]:
-    """Build the 22 pure-axis family specifications."""
+    """Build Stage 1 spacing-family specifications.
+
+    Allocation, depth, and fixed TP mutate inside every family. They are not
+    standalone Stage 1 families.
+    """
+    no_confirmations = ()
     return [
-        # === Group A: Pure grid families (8) ===
+        # === Pure executable spacing families (8) ===
         FamilySpec(
-            name="pure_fixed_pct",
+            name="fixed_pct_spacing",
             forced_grid_methods=(GridMethod.FIXED_PCT,),
+            forced_confirmations=no_confirmations,
             description="Fixed percentage grid spacing only",
         ),
         FamilySpec(
-            name="pure_atr",
+            name="atr_spacing",
             forced_grid_methods=(GridMethod.ATR,),
+            forced_confirmations=no_confirmations,
             description="ATR-based grid spacing only",
         ),
         FamilySpec(
-            name="pure_volatility",
+            name="volatility_spacing",
             forced_grid_methods=(GridMethod.VOLATILITY,),
+            forced_confirmations=no_confirmations,
             description="Volatility-based grid spacing only",
         ),
         FamilySpec(
-            name="pure_drawdown",
+            name="drawdown_from_high_spacing",
             forced_grid_methods=(GridMethod.DRAWDOWN_FROM_HIGH,),
+            forced_confirmations=no_confirmations,
             description="Drawdown-from-high grid spacing only",
         ),
         FamilySpec(
-            name="pure_ma_distance",
+            name="ma_distance_spacing",
             forced_grid_methods=(GridMethod.MA_DISTANCE,),
+            forced_confirmations=no_confirmations,
             description="MA distance grid spacing only",
         ),
         FamilySpec(
-            name="pure_rsi_oversold",
+            name="rsi_oversold_spacing",
             forced_grid_methods=(GridMethod.RSI_OVERSOLD,),
+            forced_confirmations=no_confirmations,
             description="RSI oversold grid spacing only",
         ),
         FamilySpec(
-            name="pure_z_score",
+            name="z_score_spacing",
             forced_grid_methods=(GridMethod.Z_SCORE,),
+            forced_confirmations=no_confirmations,
             description="Z-score grid spacing only",
         ),
         FamilySpec(
-            name="pure_trend_adjusted",
+            name="trend_adjusted_spacing",
             forced_grid_methods=(GridMethod.TREND_ADJUSTED,),
+            forced_confirmations=no_confirmations,
             description="Trend-adjusted grid spacing only",
         ),
-        # === Group B: Allocation-focused (5) ===
+        # === Executable hybrid spacing families (composed of existing methods) ===
         FamilySpec(
-            name="alloc_equal",
-            forced_allocation=AllocationMethod.EQUAL,
-            description="Equal allocation across DCA layers",
+            name="hybrid_atr_drawdown_spacing",
+            forced_grid_methods=(GridMethod.ATR, GridMethod.DRAWDOWN_FROM_HIGH),
+            forced_confirmations=no_confirmations,
+            family_kind="hybrid_spacing",
+            description="ATR and drawdown spacing hybrid",
         ),
         FamilySpec(
-            name="alloc_linear_inc",
-            forced_allocation=AllocationMethod.LINEAR_INCREASING,
-            description="Linear increasing allocation across DCA layers",
+            name="hybrid_rsi_zscore_spacing",
+            forced_grid_methods=(GridMethod.RSI_OVERSOLD, GridMethod.Z_SCORE),
+            forced_confirmations=no_confirmations,
+            family_kind="hybrid_spacing",
+            description="RSI oversold and Z-score spacing hybrid",
         ),
         FamilySpec(
-            name="alloc_ctrl_exp",
-            forced_allocation=AllocationMethod.CONTROLLED_EXP,
-            description="Controlled exponential allocation across DCA layers",
+            name="hybrid_ma_trend_spacing",
+            forced_grid_methods=(GridMethod.MA_DISTANCE, GridMethod.TREND_ADJUSTED),
+            forced_confirmations=no_confirmations,
+            family_kind="hybrid_spacing",
+            description="MA distance and trend-adjusted spacing hybrid",
         ),
         FamilySpec(
-            name="alloc_dd_adj",
-            forced_allocation=AllocationMethod.DRAWDOWN_ADJUSTED,
-            description="Drawdown-adjusted allocation across DCA layers",
+            name="hybrid_volatility_atr_spacing",
+            forced_grid_methods=(GridMethod.VOLATILITY, GridMethod.ATR),
+            forced_confirmations=no_confirmations,
+            family_kind="hybrid_spacing",
+            description="Volatility and ATR spacing hybrid",
         ),
         FamilySpec(
-            name="alloc_vol_adj",
-            forced_allocation=AllocationMethod.VOLATILITY_ADJUSTED,
-            description="Volatility-adjusted allocation across DCA layers",
-        ),
-        # === Group C: Confirmation-focused (6) ===
-        FamilySpec(
-            name="confirm_rsi",
-            forced_confirmations=(ConfirmationIndicator.RSI_BELOW, ConfirmationIndicator.RSI_ABOVE),
-            description="RSI-based entry confirmations",
+            name="hybrid_volatility_drawdown_spacing",
+            forced_grid_methods=(GridMethod.VOLATILITY, GridMethod.DRAWDOWN_FROM_HIGH),
+            forced_confirmations=no_confirmations,
+            family_kind="hybrid_spacing",
+            description="Volatility and drawdown spacing hybrid",
         ),
         FamilySpec(
-            name="confirm_ma",
-            forced_confirmations=(ConfirmationIndicator.MA_BELOW, ConfirmationIndicator.MA_ABOVE),
-            description="MA-based entry confirmations",
+            name="hybrid_ma_volatility_spacing",
+            forced_grid_methods=(GridMethod.MA_DISTANCE, GridMethod.VOLATILITY),
+            forced_confirmations=no_confirmations,
+            family_kind="hybrid_spacing",
+            description="MA distance and volatility spacing hybrid",
         ),
         FamilySpec(
-            name="confirm_vol",
-            forced_confirmations=(ConfirmationIndicator.VOLATILITY_HIGH, ConfirmationIndicator.VOLATILITY_LOW),
-            description="Volatility-based entry confirmations",
+            name="hybrid_trend_drawdown_spacing",
+            forced_grid_methods=(GridMethod.TREND_ADJUSTED, GridMethod.DRAWDOWN_FROM_HIGH),
+            forced_confirmations=no_confirmations,
+            family_kind="hybrid_spacing",
+            description="Trend-adjusted and drawdown spacing hybrid",
         ),
         FamilySpec(
-            name="confirm_none",
-            forced_confirmations=(),
-            description="No entry confirmations (price trigger only)",
-        ),
-        FamilySpec(
-            name="confirm_rsi_ma",
-            forced_confirmations=(ConfirmationIndicator.RSI_BELOW, ConfirmationIndicator.MA_ABOVE),
-            description="Mixed RSI+MA entry confirmations",
-        ),
-        FamilySpec(
-            name="confirm_vol_rsi",
-            forced_confirmations=(ConfirmationIndicator.VOLATILITY_LOW, ConfirmationIndicator.RSI_BELOW),
-            description="Mixed volatility+RSI entry confirmations",
-        ),
-        # === Group D: Depth-focused (3) ===
-        FamilySpec(
-            name="shallow_dca",
-            max_dca_layers_cap=4,
-            description="Shallow DCA: max 2-4 layers",
-        ),
-        FamilySpec(
-            name="medium_dca",
-            max_dca_layers_cap=7,
-            description="Medium DCA: max 5-7 layers",
-        ),
-        FamilySpec(
-            name="deep_dca",
-            max_dca_layers_cap=10,
-            description="Deep DCA: max 8-10 layers",
+            name="hybrid_fixed_atr_spacing",
+            forced_grid_methods=(GridMethod.FIXED_PCT, GridMethod.ATR),
+            forced_confirmations=no_confirmations,
+            family_kind="hybrid_spacing",
+            description="Fixed percentage and ATR spacing hybrid",
         ),
     ]
 

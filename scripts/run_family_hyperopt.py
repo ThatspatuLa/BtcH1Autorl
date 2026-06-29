@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """run_family_hyperopt.py — Stage 10 family-budgeted hyperopt (3-phase).
 
-Phase 1: Discovery sweep — 22 pure-axis families × 500 epochs each.
+Phase 1: Discovery sweep — spacing families × 500 epochs each.
 Phase 2: Deep optimisation — top-5 families × 5,000 epochs each.
 Phase 3: Combo deep-dive — top-10 triples × (10 iterations × 500 epochs).
 
@@ -57,6 +57,10 @@ from evolution.hyperopt_config import (
     build_family_specs,
     build_triple_combos,
 )
+from evolution.family_contracts import (
+    clear_active_family_contract,
+    set_active_family_contract,
+)
 from evolution.population_builder import (
     build_population,
     set_family_constraints,
@@ -96,6 +100,8 @@ def apply_family_constraints(family: FamilySpec) -> None:
     Must be called before EvolutionHarness.run(). Call clear_family_constraints()
     after the run completes.
     """
+    set_active_family_contract(family.mutation_contract)
+
     # Convert enum tuples to the format expected by population_builder
     forced_grid = tuple(family.forced_grid_methods) if family.forced_grid_methods else None
     forced_alloc = family.forced_allocation if family.forced_allocation else None
@@ -158,6 +164,7 @@ def run_phase1_family(family: FamilySpec, df: pd.DataFrame) -> dict[str, Any]:
         mutation_rate=0.30,
         crossover_rate=0.50,
         max_generations=PHASE1_EPOCHS_PER_FAMILY,
+        per_island_stagnation=False,
         stagnation_generations=5,
         all_rejected_generations=3,
         parallel_workers=8,
@@ -174,6 +181,7 @@ def run_phase1_family(family: FamilySpec, df: pd.DataFrame) -> dict[str, Any]:
         result = _run_evolution(config, output_dir, df)
     finally:
         clear_family_constraints()
+        clear_active_family_contract()
 
     summary = {
         "phase": 1,
@@ -191,6 +199,7 @@ def run_phase1_family(family: FamilySpec, df: pd.DataFrame) -> dict[str, Any]:
             "forced_confirmations": [c.value for c in family.forced_confirmations] if family.forced_confirmations is not None and family.forced_confirmations is not _UNSET else None,
             "max_dca_layers_cap": family.max_dca_layers_cap,
         },
+        "family_contract": family.mutation_contract.to_dict(),
         "seed": family.deterministic_seed,
         "completed_at": time.time(),
     }
@@ -218,6 +227,7 @@ def run_phase2_family(family: FamilySpec, phase1_summary: dict[str, Any], df: pd
         mutation_rate=PHASE2_MUTATION_RATE,
         crossover_rate=PHASE2_CROSSOVER_RATE,
         max_generations=PHASE2_EPOCHS_PER_FAMILY,
+        per_island_stagnation=False,
         stagnation_generations=200,
         all_rejected_generations=3,
         parallel_workers=8,
@@ -234,6 +244,7 @@ def run_phase2_family(family: FamilySpec, phase1_summary: dict[str, Any], df: pd
         result = _run_evolution(config, output_dir, df)
     finally:
         clear_family_constraints()
+        clear_active_family_contract()
 
     summary = {
         "phase": 2,
@@ -247,6 +258,7 @@ def run_phase2_family(family: FamilySpec, phase1_summary: dict[str, Any], df: pd
         "generations_completed": result.get("generations_completed", 0),
         "phase1_fitness": phase1_summary.get("best_fitness", 0.0),
         "fitness_improvement": result.get("best_fitness_ever", 0.0) - phase1_summary.get("best_fitness", 0.0),
+        "family_contract": family.mutation_contract.to_dict(),
         "completed_at": time.time(),
     }
     summary_path.write_text(json.dumps(summary, indent=2))
@@ -285,6 +297,7 @@ def run_phase3_combo_iteration(
         mutation_rate=PHASE2_MUTATION_RATE,
         crossover_rate=PHASE2_CROSSOVER_RATE,
         max_generations=PHASE3_EPOCHS_PER_ITERATION,
+        per_island_stagnation=False,
         stagnation_generations=100,
         all_rejected_generations=3,
         parallel_workers=8,
