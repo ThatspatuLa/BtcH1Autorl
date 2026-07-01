@@ -366,7 +366,7 @@ def run_phase3_combo_iteration(
 #   - Stage 2 emits zones through the candidate's DcaGenome.zones field; the
 #     OrderManager switches grid_method+grid_params at zone boundaries
 
-STAGE2_COMBO_EPOCHS: int = 5000  # matches PHASE2_EPOCHS_PER_FAMILY
+STAGE2_COMBO_EPOCHS: int = 1000  # capped from 5000 — combos plateau by gen 33-50, smart-adjust window shrinks; 1000 gives 1-3h per combo instead of 13+h
 
 
 def run_stage2_combo(combo: ComboSpec, df: pd.DataFrame) -> dict[str, Any]:
