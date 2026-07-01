@@ -172,6 +172,7 @@ def _evaluate_one(
         cooldown_candles=dca_params.get("cooldown_candles", 0),
         grid_method=dca_params.get("grid_method", "fixed_pct"),
         grid_params=dca_params.get("grid_params"),
+        zones=dca_params.get("zones"),
     )
 
     # Stage 6 + 6.5: monthly fitness + deployment gates

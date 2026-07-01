@@ -59,9 +59,20 @@ from evolution.hyperopt_config import (
 )
 from evolution.family_contracts import (
     clear_active_family_contract,
+    combo_contract_from_spec,
+    set_active_combo_contract,
+    clear_active_combo_contract,
     set_active_family_contract,
 )
+from evolution.combo_specs import (
+    COMBO_SPLIT_STRATEGIES,
+    COMBO_DEFAULT_MAX_DCA_LAYERS,
+    ComboSpec,
+    build_stage2_combos,
+    select_top_families_from_stage1,
+)
 from evolution.population_builder import (
+    build_combo_population,
     build_population,
     set_family_constraints,
     clear_family_constraints,
@@ -85,8 +96,17 @@ def phase3_output_dir(combo_name: str, iteration: int) -> Path:
     return ROOT / "runs" / "hyperopt" / "combo" / combo_name / f"iteration_{iteration:02d}"
 
 
+def phase2_combo_output_dir(combo_name: str) -> Path:
+    """Stage 2 combo output dir — single 5,000-epoch run per combo (no iterations)."""
+    return ROOT / "runs" / "hyperopt" / "stage2_combo" / combo_name
+
+
 def phase_summary_path(phase: int) -> Path:
     return ROOT / "runs" / "hyperopt" / "phase_summaries" / f"phase{phase}_results.json"
+
+
+def stage2_combo_summary_path() -> Path:
+    return ROOT / "runs" / "hyperopt" / "phase_summaries" / "stage2_combo_results.json"
 
 
 # ============================================================
@@ -331,6 +351,132 @@ def run_phase3_combo_iteration(
 
 
 # ============================================================
+# Stage 2 — Combo deep-dive (60 combos)
+# ============================================================
+#
+# User directive 2026-07-01: full Option A — true per-layer zones, 5,000 epochs,
+# smart-adjust around elite medians. Pairs (10) + triples (10) × 3 split
+# strategies = 60 ComboSpec runs.
+#
+# Differences from Phase 3:
+#   - Phase 3 was a placeholder; we now have a real ComboSpec with rendered zones
+#   - Stage 2 uses PHASE2_EPOCHS_PER_FAMILY (5000) not PHASE3_EPOCHS_PER_ITERATION (500)
+#   - Stage 2 has ONE run per combo (no iterations); the per-combo smart-adjust is
+#     handled by the SmartMutator's elite-median tightening (200-gen stagnation guard)
+#   - Stage 2 emits zones through the candidate's DcaGenome.zones field; the
+#     OrderManager switches grid_method+grid_params at zone boundaries
+
+STAGE2_COMBO_EPOCHS: int = 5000  # matches PHASE2_EPOCHS_PER_FAMILY
+
+
+def run_stage2_combo(combo: ComboSpec, df: pd.DataFrame) -> dict[str, Any]:
+    """Run one Stage 2 combo (single 5,000-epoch run)."""
+    output_dir = phase2_combo_output_dir(combo.name)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    summary_path = output_dir / "run_summary.json"
+    if summary_path.exists():
+        existing = json.loads(summary_path.read_text())
+        if existing.get("status") == "complete":
+            return existing
+
+    # Activate combo contract — keeps mutation/crossover aware of family constraints
+    set_active_combo_contract(combo_contract_from_spec(combo))
+
+    # Build seeded population: all 500 candidates share the combo's zones
+    # but vary in allocation, depth, cooldown, tp_pct, confirmation_indicators.
+    # We pass it via EvolutionHarness's `seeded_population` parameter.
+    seeded_rng = random.Random(combo.deterministic_seed)
+    seeded_pop = build_combo_population(
+        rng=seeded_rng,
+        generation_index=0,
+        gid_start=0,
+        zones=list(combo.zones),
+        n=500,  # matches candidates_per_gen default
+    )
+
+    config = EvolutionConfig(
+        candidates_per_gen=500,
+        elite_count=20,
+        random_injection=PHASE2_RANDOM_INJECTION,
+        mutation_rate=PHASE2_MUTATION_RATE,
+        crossover_rate=PHASE2_CROSSOVER_RATE,
+        max_generations=STAGE2_COMBO_EPOCHS,
+        per_island_stagnation=False,
+        stagnation_generations=200,  # 200-gen stagnation as agreed
+        all_rejected_generations=3,
+        parallel_workers=8,
+        base_seed=combo.deterministic_seed,
+        output_dir=str(output_dir),
+        experiment_id=f"hyperopt_stage2_{combo.name}",
+        island_mode=False,
+        retirement_enabled=False,
+        force_retire_after_gens=999,
+        checkpoint_interval_minutes=20,
+        combo_zones=list(combo.zones),  # threaded to harness random injection
+    )
+
+    try:
+        # Run directly so we can pass `seeded_population`
+        harness = EvolutionHarness(config, df, seeded_population=seeded_pop)
+        summary_obj = harness.run()
+        result = summary_obj.to_dict()
+        history_path = output_dir / "generation_history.json"
+        total_deploy_passing = 0
+        total_passed = 0
+        if history_path.exists():
+            hist = json.loads(history_path.read_text())
+            for gen in hist.get("generations", []):
+                total_deploy_passing += gen.get("n_deployment_passing", 0)
+                total_passed += gen.get("n_passed", 0)
+        result["n_deployment_passing"] = total_deploy_passing
+        result["n_passed"] = total_passed
+    finally:
+        clear_active_combo_contract()
+
+    summary = {
+        "phase": "stage2_combo",
+        "combo": combo.name,
+        "families": list(combo.families),
+        "split_strategy": combo.split_strategy,
+        "zones": [z.to_dict() for z in combo.zones],
+        "max_dca_layers": combo.max_dca_layers,
+        "status": "complete",
+        "max_generations": STAGE2_COMBO_EPOCHS,
+        "best_fitness": result.get("best_fitness_ever", 0.0),
+        "n_deployment_passing": result.get("n_deployment_passing", 0),
+        "n_passed": result.get("n_passed", 0),
+        "generations_completed": result.get("generations_completed", 0),
+        "completed_at": time.time(),
+    }
+    summary_path.write_text(json.dumps(summary, indent=2))
+    return summary
+
+
+def collect_stage2_combo_results() -> list[dict[str, Any]]:
+    """Collect all Stage 2 combo results, ranked by best_fitness."""
+    summary_path = stage2_combo_summary_path()
+    if summary_path.exists():
+        data = json.loads(summary_path.read_text())
+        return data.get("ranking", [])
+    # Otherwise read from individual run_summary.json files
+    base = ROOT / "runs" / "hyperopt" / "stage2_combo"
+    if not base.exists():
+        return []
+    results = []
+    for combo_dir in sorted(base.iterdir()):
+        if not combo_dir.is_dir():
+            continue
+        summary_path = combo_dir / "run_summary.json"
+        if summary_path.exists():
+            d = json.loads(summary_path.read_text())
+            if d.get("status") == "complete":
+                results.append(d)
+    results.sort(key=lambda r: r.get("best_fitness", 0.0), reverse=True)
+    return results
+
+
+# ============================================================
 # Phase orchestration helpers
 # ============================================================
 
@@ -413,16 +559,24 @@ def collect_phase3_results() -> list[dict[str, Any]]:
 
 def main():
     parser = argparse.ArgumentParser(description="Stage 10 family-budgeted hyperopt")
-    parser.add_argument("--phase", type=int, required=True, choices=[1, 2, 3])
+    parser.add_argument("--phase", type=str, required=True,
+                        choices=["1", "2", "3", "stage2_combo"],
+                        help="Phase 1 = family discovery (single zone). Phase 2 = family deep-opt. "
+                             "Phase 3 = combo iterations (legacy). stage2_combo = Stage 2 combos (Option A).")
     parser.add_argument("--family", type=str, help="Family name to run")
     parser.add_argument("--all-families", action="store_true", help="Run all families in this phase")
     parser.add_argument("--iteration", type=int, default=1, help="Phase 3 iteration number (1-10)")
     parser.add_argument("--status", action="store_true", help="Show phase status and exit")
     parser.add_argument("--rank", action="store_true", help="Show ranking and exit")
+    # Stage 2 combo flags
+    parser.add_argument("--combo", type=str, help="Stage 2 combo name to run (e.g. combo_pair_3_split_atr_spacing_drawdown_from_high_spacing)")
+    parser.add_argument("--list-combos", action="store_true", help="List all Stage 2 combo names and exit")
+    parser.add_argument("--top-families", type=str, nargs="+", default=None,
+                        help="Top family names for stage2_combo (defaults to Stage 1 top-5)")
     args = parser.parse_args()
 
     if args.status:
-        if args.phase == 1:
+        if args.phase == "1":
             results = collect_phase1_results()
             families = build_family_specs()
             completed = len(results)
@@ -430,28 +584,37 @@ def main():
             print(f"Phase 1: {completed}/{total} families complete")
             for r in results:
                 print(f"  {r['family']:30s}  fitness={r['best_fitness']:.6f}  deploy_pass={r['n_deployment_passing']}")
-        elif args.phase == 2:
+        elif args.phase == "2":
             top5 = select_top5_families()
             print(f"Phase 2: top-5 = {top5}")
             results = collect_phase2_results()
             for r in results:
                 print(f"  {r['family']:30s}  fitness={r['best_fitness']:.6f}  improvement={r.get('fitness_improvement', 0):+.6f}")
-        elif args.phase == 3:
+        elif args.phase == "3":
             results = collect_phase3_results()
             print(f"Phase 3: {len(results)} combos evaluated")
             for r in results:
                 print(f"  {r['combo']:50s}  fitness={r['best_fitness']:.6f}  total_deploy={r['total_deployment_passing']}")
+        elif args.phase == "stage2_combo":
+            results = collect_stage2_combo_results()
+            print(f"Stage 2 combos: {len(results)} complete")
+            for r in results[:60]:
+                print(f"  {r.get('combo', '?'):80s}  fitness={r.get('best_fitness', 0):.6f}  deploy={r.get('n_deployment_passing', 0)}")
         return
 
     if args.rank:
-        if args.phase in (1, 2):
-            results = collect_phase1_results() if args.phase == 1 else collect_phase2_results()
+        if args.phase in ("1", "2"):
+            results = collect_phase1_results() if args.phase == "1" else collect_phase2_results()
             for i, r in enumerate(results):
                 print(f"{i+1:2d}. {r.get('family', r.get('combo', '?')):30s}  fitness={r['best_fitness']:.6f}")
-        elif args.phase == 3:
+        elif args.phase == "3":
             results = collect_phase3_results()
             for i, r in enumerate(results):
                 print(f"{i+1:2d}. {r['combo']:50s}  fitness={r['best_fitness']:.6f}")
+        elif args.phase == "stage2_combo":
+            results = collect_stage2_combo_results()
+            for i, r in enumerate(results):
+                print(f"{i+1:2d}. {r.get('combo', '?'):80s}  fitness={r.get('best_fitness', 0):.6f}  split={r.get('split_strategy', '?')}")
         return
 
     # Load BTC H1 market data
@@ -463,7 +626,7 @@ def main():
     df = pd.read_feather(data_path)
     print(f"[hyperopt] Loaded {len(df):,} rows")
 
-    if args.phase == 1:
+    if args.phase == "1":
         families = {f.name: f for f in build_family_specs()}
         if args.all_families:
             results = []
@@ -485,7 +648,7 @@ def main():
             print("Specify --family NAME or --all-families")
             sys.exit(1)
 
-    elif args.phase == 2:
+    elif args.phase == "2":
         top5 = select_top5_families()
         families = {f.name: f for f in build_family_specs()}
         phase1_results = {r["family"]: r for r in collect_phase1_results()}
@@ -515,7 +678,7 @@ def main():
             print("Specify --family NAME or --all-families")
             sys.exit(1)
 
-    elif args.phase == 3:
+    elif args.phase == "3":
         top5 = select_top5_families()
         combos = build_triple_combos(top5)
         combos = combos[:PHASE3_TOP_N_COMBOS]
@@ -544,6 +707,43 @@ def main():
             print(json.dumps(result, indent=2))
         else:
             print("Specify --family COMBO_NAME or --all-families")
+            sys.exit(1)
+
+    elif args.phase == "stage2_combo":
+        # Resolve top families
+        if args.top_families:
+            top_names = args.top_families
+        else:
+            phase1_results = collect_phase1_results()
+            top_names = select_top_families_from_stage1(phase1_results, top_n=5)
+            print(f"[Stage 2] Auto-selected top-5 from Stage 1: {top_names}")
+
+        combos = build_stage2_combos(top_names)
+        print(f"[Stage 2] Built {len(combos)} combo specs ({COMBO_DEFAULT_MAX_DCA_LAYERS} layers each)")
+
+        if args.list_combos:
+            print("Available Stage 2 combos:")
+            for i, c in enumerate(combos):
+                print(f"  {i+1:2d}. {c.name}  ({c.n_families} families, {c.split_strategy})")
+            return
+
+        if args.all_families:
+            for i, combo in enumerate(combos):
+                print(f"[Stage 2] ({i+1}/{len(combos)}) Running: {combo.name}")
+                result = run_stage2_combo(combo, df)
+                print(f"[Stage 2] {combo.name}: fitness={result['best_fitness']:.6f}")
+            print(f"[Stage 2] Complete. {len(combos)} combos done.")
+        elif args.combo:
+            matching = [c for c in combos if c.name == args.combo]
+            if not matching:
+                print(f"Unknown combo: {args.combo}")
+                print(f"Available (first 10): {[c.name for c in combos[:10]]}")
+                sys.exit(1)
+            combo = matching[0]
+            result = run_stage2_combo(combo, df)
+            print(json.dumps(result, indent=2))
+        else:
+            print("Specify --combo NAME or --all-families (or --list-combos to list names)")
             sys.exit(1)
 
 

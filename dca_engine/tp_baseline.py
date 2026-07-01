@@ -116,6 +116,7 @@ def backtest_with_fixed_tp(
     cooldown_candles: int = 0,
     grid_method: str = "fixed_pct",
     grid_params: dict[str, float] | None = None,
+    zones: list | None = None,
 ) -> BacktestResult:
     """Run a full backtest using the Stage 9 fixed TP baseline.
 
@@ -165,6 +166,7 @@ def backtest_with_fixed_tp(
         cooldown_candles=cooldown_candles,
         grid_method=grid_method,
         grid_params=grid_params,
+        zones=zones,
         **tp_kwargs,
     )
 
@@ -180,6 +182,7 @@ def extract_dca_params_from_genome(genome: CandidateGenome | DcaGenome) -> dict[
     - confirmation_indicators → list of indicator names
     - indicator_params → dict of {indicator_name: {param: value}}
     - grid_params["cooldown_candles"] → cooldown_candles
+    - dca_genome.zones → optional list[GridZoneSpec] for per-layer method switching
     """
     dca = genome.dca_genome if isinstance(genome, CandidateGenome) else genome
     grid_method = dca.grid_method.value if hasattr(dca.grid_method, 'value') else str(dca.grid_method)
@@ -202,6 +205,8 @@ def extract_dca_params_from_genome(genome: CandidateGenome | DcaGenome) -> dict[
     cooldown_candles = int(dca.grid_params.get("cooldown_candles", 0))
     # Build grid_params for the selected grid method
     grid_params = _build_grid_params(grid_method, dca.grid_params, grid_pct)
+    # Zones (Stage 2 combos). Default None = single-zone legacy behaviour.
+    zones = dca.zones if hasattr(dca, "zones") else None
     return {
         "grid_pct": grid_pct,
         "max_layers": max_layers,
@@ -211,6 +216,7 @@ def extract_dca_params_from_genome(genome: CandidateGenome | DcaGenome) -> dict[
         "cooldown_candles": cooldown_candles,
         "grid_method": grid_method,
         "grid_params": grid_params,
+        "zones": zones,
     }
 
 

@@ -1142,6 +1142,7 @@ class EvolutionHarness:
                 rng=rng,
                 generation_index=gen_idx,
                 tp_pct=self.config.tp_pct,
+                zones=list(self.config.combo_zones) if self.config.combo_zones else None,
             )
             for _ in range(self.config.candidates_per_gen)
         ]
@@ -1177,6 +1178,7 @@ class EvolutionHarness:
             return [
                 random_candidate_genome(
                     rng=rng, generation_index=gen_idx, tp_pct=self.config.tp_pct,
+                    zones=list(self.config.combo_zones) if self.config.combo_zones else None,
                 )
                 for _ in range(target)
             ]
@@ -1205,13 +1207,19 @@ class EvolutionHarness:
         # Random injection (fresh genomes for diversity)
         for _ in range(n_random):
             children.append(
-                random_candidate_genome(rng=rng, generation_index=gen_idx, tp_pct=self.config.tp_pct)
+                random_candidate_genome(
+                    rng=rng, generation_index=gen_idx, tp_pct=self.config.tp_pct,
+                    zones=list(self.config.combo_zones) if self.config.combo_zones else None,
+                )
             )
 
         # Pad to target (shouldn't be needed but defensive)
         while len(children) < target:
             children.append(
-                random_candidate_genome(rng=rng, generation_index=gen_idx, tp_pct=self.config.tp_pct)
+                random_candidate_genome(
+                    rng=rng, generation_index=gen_idx, tp_pct=self.config.tp_pct,
+                    zones=list(self.config.combo_zones) if self.config.combo_zones else None,
+                )
             )
 
         return children[:target]

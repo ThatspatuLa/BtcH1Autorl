@@ -98,6 +98,39 @@ class MarginMode(StrEnum):
 # ============================================================
 
 @dataclass
+class GridZoneSpec:
+    """One zone in a multi-zone (combo) DCA grid.
+
+    A zone defines which grid method controls a contiguous range of layers.
+    For example, in a 3-split combo over 10 layers:
+      - zone1: layer 1-3 (shallow dip)
+      - zone2: layer 4-6 (medium dip)
+      - zone3: layer 7-10 (deep dip)
+    Each zone carries its own (grid_method, grid_params) pair so the engine
+    switches spacing behaviour when crossing a zone boundary.
+
+    `layer_start` is 1-indexed (first DCA fill). The zone ends at
+    `layer_start + layer_count - 1`. Zones must not overlap and together
+    must cover layers 1..max_dca_layers (validated in validate_genome).
+    """
+
+    layer_start: int
+    layer_count: int
+    grid_method: GridMethod
+    grid_params: dict[str, float]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "layer_start": self.layer_start,
+            "layer_count": self.layer_count,
+            "grid_method": self.grid_method.value
+            if hasattr(self.grid_method, "value")
+            else str(self.grid_method),
+            "grid_params": dict(self.grid_params),
+        }
+
+
+@dataclass
 class DcaGenome:
     grid_method: GridMethod
     grid_params: dict[str, float]
@@ -109,6 +142,10 @@ class DcaGenome:
     confirmation_indicators: list[ConfirmationIndicator] = field(default_factory=list)
     indicator_params: dict[str, dict[str, float]] = field(default_factory=dict)
     max_dca_layers: int = 5
+    # Optional per-layer zones (Stage 2 combos). None = single-zone (legacy behaviour).
+    # When set, the OrderManager switches grid_method+grid_params based on
+    # (position_layers + 1) — the index of the NEXT layer to be filled.
+    zones: list[GridZoneSpec] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -124,6 +161,8 @@ class DcaGenome:
             c.value if hasattr(c, 'value') else str(c)
             for c in self.confirmation_indicators
         ]
+        if self.zones is not None:
+            d["zones"] = [z.to_dict() for z in self.zones]
         return d
 
 
@@ -270,6 +309,20 @@ def genome_from_msgpack(blob: bytes) -> CandidateGenome:
     return _dict_to_genome(d)
 
 
+def _dict_to_zone(d: Mapping[str, Any]) -> GridZoneSpec:
+    if not isinstance(d, dict):
+        raise GenomeValidationError(f"Zone must be dict, got {type(d).__name__}")
+    for k in ("layer_start", "layer_count", "grid_method"):
+        if k not in d:
+            raise GenomeValidationError(f"Zone missing required field: {k}")
+    return GridZoneSpec(
+        layer_start=int(d["layer_start"]),
+        layer_count=int(d["layer_count"]),
+        grid_method=GridMethod(d["grid_method"]),
+        grid_params={k: float(v) for k, v in d.get("grid_params", {}).items()},
+    )
+
+
 def _dict_to_genome(d: Mapping[str, Any]) -> CandidateGenome:
     if not isinstance(d, dict):
         raise GenomeValidationError(f"Expected dict, got {type(d).__name__}")
@@ -280,6 +333,8 @@ def _dict_to_genome(d: Mapping[str, Any]) -> CandidateGenome:
     safety = d.get("safety_genome", {})
     overrides = d.get("settings_overrides", {})
     lineage = d.get("lineage", {})
+    raw_zones = dca.get("zones")
+    zones = [_dict_to_zone(z) for z in raw_zones] if raw_zones is not None else None
     return CandidateGenome(
         genome_id=d["genome_id"],
         dca_genome=DcaGenome(
@@ -293,6 +348,7 @@ def _dict_to_genome(d: Mapping[str, Any]) -> CandidateGenome:
             confirmation_indicators=[ConfirmationIndicator(c) for c in dca.get("confirmation_indicators", [])],
             indicator_params=dict(dca.get("indicator_params", {})),
             max_dca_layers=int(dca.get("max_dca_layers", 5)),
+            zones=zones,
         ),
         tp_genome=TpGenome(
             exit_method=TpExitMethod(tp["exit_method"]),
@@ -377,6 +433,9 @@ def to_freqtrade_strategy_params(genome: CandidateGenome) -> dict[str, Any]:
             "confirmation_indicators": [c.value for c in genome.dca_genome.confirmation_indicators],
             "indicator_params": genome.dca_genome.indicator_params,
             "max_dca_layers": genome.dca_genome.max_dca_layers,
+            "zones": [z.to_dict() for z in genome.dca_genome.zones]
+            if genome.dca_genome.zones is not None
+            else None,
         },
         "tp": {
             "exit_method": genome.tp_genome.exit_method.value,
@@ -456,3 +515,43 @@ def validate_genome(genome: CandidateGenome) -> None:
             continue
         if not isinstance(v, (int, float)) or math.isnan(v) or math.isinf(v):
             raise GenomeValidationError(f"settings_overrides[{k!r}] must be finite number, got {v!r}")
+
+    # Zones — when present, must be a contiguous, non-overlapping cover of layers 1..max_dca_layers
+    if genome.dca_genome.zones is not None:
+        zones = genome.dca_genome.zones
+        if not zones:
+            raise GenomeValidationError("zones list is empty (use None for single-zone)")
+        # Sort by layer_start for validation
+        sorted_zones = sorted(zones, key=lambda z: z.layer_start)
+        cursor = 1
+        for zone in sorted_zones:
+            if zone.layer_start < 1:
+                raise GenomeValidationError(
+                    f"zone.layer_start must be >= 1, got {zone.layer_start}"
+                )
+            if zone.layer_count < 1:
+                raise GenomeValidationError(
+                    f"zone.layer_count must be >= 1, got {zone.layer_count}"
+                )
+            if zone.layer_start != cursor:
+                raise GenomeValidationError(
+                    f"zones must be contiguous starting at 1 — gap at layer {cursor}, "
+                    f"next zone starts at {zone.layer_start}"
+                )
+            cursor += zone.layer_count
+            # Validate zone grid_params are finite numbers
+            for k, v in zone.grid_params.items():
+                if (
+                    not isinstance(v, (int, float))
+                    or isinstance(v, bool)
+                    or math.isnan(v)
+                    or math.isinf(v)
+                ):
+                    raise GenomeValidationError(
+                        f"zone.grid_params[{k!r}] must be finite number, got {v!r}"
+                    )
+        if cursor - 1 != genome.dca_genome.max_dca_layers:
+            raise GenomeValidationError(
+                f"zones cover layers 1..{cursor - 1} but max_dca_layers="
+                f"{genome.dca_genome.max_dca_layers} (must match)"
+            )

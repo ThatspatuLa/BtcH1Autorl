@@ -681,3 +681,68 @@ def get_island_id_for_genome(genome: CandidateGenome) -> int:
         if isinstance(op, dict) and op.get("op") == "island_assign":
             return int(op.get("island_id", 0))
     return 0
+
+
+# ============================================================
+# Combo population (Stage 2)
+# ============================================================
+
+
+def build_combo_population(
+    rng: random.Random,
+    generation_index: int,
+    gid_start: int,
+    zones: list,
+    n: int,
+) -> list[CandidateGenome]:
+    """Build n combo candidates all sharing the same per-layer zones.
+
+    Each candidate has:
+    - zones from the combo spec (immutable across mutation/crossover)
+    - a grid_method equal to zones[0].grid_method (flat — OrderManager picks from zones)
+    - random allocation_method + allocation_params (free to mutate)
+    - random confirmation_indicators (free to mutate, capped at 3)
+    - random cooldown_candles
+    - max_dca_layers = sum of zone layer_count (from the combo contract)
+
+    Allocation/depth/cooldown vary per candidate. Zones stay fixed — that's the
+    whole point of a combo: the layer-to-method mapping is the contract, the
+    candidate's job is to find the best params WITHIN that contract.
+    """
+    from evolution.operators import random_candidate_genome as _rcg
+
+    if not zones:
+        raise ValueError("build_combo_population requires non-empty zones list")
+
+    # Sum layer_count across zones — must equal max_dca_layers.
+    max_layers_total = sum(z.layer_count for z in zones)
+    # Each candidate gets the same zones, same grid_method (zones[0] for the flat slot),
+    # but allocation/cooldown/confirmation_indicators are randomised.
+    primary_method = zones[0].grid_method
+    primary_params = dict(zones[0].grid_params)
+    primary_params["max_layers"] = max_layers_total
+    primary_params["tp_pct"] = rng.uniform(*DCA_PARAM_RANGES["tp_pct"])
+
+    candidates: list[CandidateGenome] = []
+    for i in range(n):
+        gid = gid_start + i
+        cooldown = rng.randint(
+            int(DCA_PARAM_RANGES["cooldown_candles"][0]),
+            int(DCA_PARAM_RANGES["cooldown_candles"][1]),
+        )
+        primary_params["cooldown_candles"] = cooldown
+        c = _rcg(
+            rng=rng,
+            genome_id=_make_genome_id(generation_index, gid),
+            generation_index=generation_index,
+            tp_pct=primary_params["tp_pct"],
+            forced_grid_method=primary_method,
+            zones=list(zones),  # copy so future candidates aren't aliased
+        )
+        # The flat grid_method slot is set to zones[0]'s method (legacy compat).
+        # OrderManager uses zones when present, so this is for reporting only.
+        c.dca_genome.grid_method = primary_method
+        c.dca_genome.grid_params = dict(primary_params)
+        c.dca_genome.max_dca_layers = max_layers_total
+        candidates.append(c)
+    return candidates

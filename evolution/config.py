@@ -114,6 +114,10 @@ class EvolutionConfig:
     _combo_families: list | None = None
     _combo_layer_split: dict | None = None
     _combo_iteration: int = 0
+    # Stage 2 combo zones (per-layer method switching). When set, the harness
+    # produces candidates with these zones attached and the OrderManager switches
+    # grid_method+grid_params at each zone boundary. Used by Stage 2 combo runs.
+    combo_zones: list | None = None
 
     def __post_init__(self) -> None:
         if self.candidates_per_gen < 1:

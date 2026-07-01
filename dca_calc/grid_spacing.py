@@ -43,6 +43,55 @@ class GridContext:
 # Dispatcher
 # ============================================================
 
+# ============================================================
+# Zone-aware helpers (Stage 2 combos)
+# ============================================================
+
+
+def select_active_zone(zones: list, next_layer_index: int):
+    """Pick the zone that owns this layer (1-indexed).
+
+    Returns the GridZoneSpec whose range contains next_layer_index, or None
+    if no zones provided. Falls back to the last zone when next_layer_index
+    exceeds all zone bounds (defensive — shouldn't happen when zone coverage
+    matches max_dca_layers).
+    """
+    if not zones:
+        return None
+    for zone in zones:
+        if zone.layer_start <= next_layer_index <= zone.layer_start + zone.layer_count - 1:
+            return zone
+    return zones[-1]
+
+
+def compute_next_layer_price_zoned(
+    zones: list,
+    next_layer_index: int,
+    ctx: GridContext,
+    fallback_method: str = "fixed_pct",
+    fallback_params: dict | None = None,
+) -> float | None:
+    """Pick the active zone's (method, params) and compute the trigger price.
+
+    Used by OrderManager when zones is set. When zones is empty/None,
+    falls back to the flat (method, params) supplied via fallback_* args.
+    """
+    zone = select_active_zone(zones, next_layer_index)
+    if zone is None:
+        return compute_next_layer_price(
+            grid_method=fallback_method,
+            grid_params=fallback_params or {},
+            ctx=ctx,
+        )
+    return compute_next_layer_price(
+        grid_method=zone.grid_method.value
+        if hasattr(zone.grid_method, "value")
+        else str(zone.grid_method),
+        grid_params=zone.grid_params,
+        ctx=ctx,
+    )
+
+
 def compute_next_layer_price(
     grid_method: str,
     grid_params: dict[str, float],

@@ -185,6 +185,7 @@ def random_dca_genome(
     tp_pct: float | None = None,
     forced_grid_method: GridMethod | None = None,
     forced_allocation_method: AllocationMethod | None = None,
+    zones: list | None = None,
 ) -> DcaGenome:
     """Generate a random DcaGenome within the Stage 10 search space.
 
@@ -192,6 +193,9 @@ def random_dca_genome(
     Allocation method is randomly selected from ALL_ALLOCATION_METHODS (or forced).
     Confirmation indicators: 0-3 from the 6 available types.
     Cooldown: 0-12 candles.
+
+    zones: optional list[GridZoneSpec] (Stage 2 combos). When provided, the
+    candidate is tagged as a combo candidate with per-layer method switching.
     """
     rng = rng or random.Random()
 
@@ -237,6 +241,7 @@ def random_dca_genome(
         confirmation_indicators=selected_indicators,
         indicator_params=indicator_params,
         max_dca_layers=max_layers,
+        zones=zones,
     )
 
 
@@ -247,6 +252,7 @@ def random_candidate_genome(
     tp_pct: float | None = None,
     forced_grid_method: GridMethod | None = None,
     forced_allocation_method: AllocationMethod | None = None,
+    zones: list | None = None,
 ) -> CandidateGenome:
     """Generate a full random CandidateGenome within the Stage 10 search space."""
     rng = rng or random.Random()
@@ -256,6 +262,7 @@ def random_candidate_genome(
         tp_pct=tp_pct,
         forced_grid_method=forced_grid_method,
         forced_allocation_method=forced_allocation_method,
+        zones=zones,
     )
     gid = genome_id or f"genome_G{generation_index}_{rng.randint(0, 1_000_000):06d}"
     return CandidateGenome(
@@ -466,6 +473,12 @@ def mutate(
                     new_ind_params[ind_name][param_key] = current_val + rng.gauss(0, std)
 
     # Build child genome
+    # Zones handling (Stage 2 combos): zones are part of the combo contract, NOT
+    # the candidate's DNA. They stay fixed across mutation. When the parent has
+    # zones, the child inherits them verbatim. When neither has zones, the child
+    # has no zones (single-zone legacy behaviour). When one parent has zones and
+    # the other doesn't, prefer the zoned parent.
+    parent_zones = parent_dca.zones if parent_dca.zones else None
     new_dca = DcaGenome(
         grid_method=new_grid_method,
         grid_params=new_grid_params,
@@ -477,6 +490,7 @@ def mutate(
         confirmation_indicators=new_indicators,
         indicator_params=new_ind_params,
         max_dca_layers=int(current_layers),
+        zones=parent_zones,
     )
     new_tp = TpGenome(
         exit_method=parent.tp_genome.exit_method,
@@ -647,6 +661,11 @@ def crossover(
         confirmation_indicators=new_indicators,
         indicator_params=merged_ind_params,
         max_dca_layers=max_layers,
+        # Zones handling (Stage 2 combos): prefer the zoned parent. If neither has
+        # zones, child has no zones (single-zone legacy behaviour). If both have
+        # zones, prefer parent_a (primary). The zone assignment is part of the
+        # combo contract, not subject to crossover.
+        zones=a_dca.zones if a_dca.zones else b_dca.zones,
     )
     new_tp_genome = TpGenome(
         exit_method=parent_a.tp_genome.exit_method,

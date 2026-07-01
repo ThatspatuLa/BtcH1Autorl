@@ -35,10 +35,11 @@ class OrderDecision:
 
 
 class OrderManager:
-    """Order manager with optional confirmation gating and pluggable grid methods.
+    """Order manager with optional confirmation gating, pluggable grid methods, and per-layer zones.
 
     Args:
-        grid_pct: spacing between DCA layers as % of average_entry (e.g. 0.015 = 1.5%)
+        grid_pct: spacing between DCA layers as % of average_entry (e.g. 0.015 = 1.5%).
+                  Used as fallback for fixed_pct and as default pct when grid_params omits it.
         tp_pct: take-profit as % of average_entry (e.g. 0.02 = 2%)
         max_layers: max number of DCA layers per cycle
         symbol: trading pair (default "BTC/USDT")
@@ -46,8 +47,14 @@ class OrderManager:
         confirmation_indicators: list of indicator names to gate on (empty = no gating)
         indicator_params: dict of {indicator_name: {param: value}} for threshold overrides
         cooldown_candles: candles to wait after cycle close before opening new cycle
-        grid_method: grid spacing method (default "fixed_pct")
+        grid_method: grid spacing method (default "fixed_pct") — used when zones is None
         grid_params: extra params for the grid method (e.g. {"pct": 0.015, "atr_multiplier": 2.0})
+                     — used when zones is None
+        zones: optional list of GridZoneSpec for per-layer method switching (Stage 2 combos).
+               When set, the OrderManager picks (grid_method, grid_params) from the zone whose
+               layer_start..layer_start+layer_count-1 range contains the next layer index
+               (position_layers + 1, 1-indexed). The flat grid_method/grid_params kwargs are
+               ignored when zones is set.
     """
 
     def __init__(
@@ -62,6 +69,7 @@ class OrderManager:
         cooldown_candles: int = 0,
         grid_method: str = "fixed_pct",
         grid_params: dict[str, float] | None = None,
+        zones: list | None = None,
     ) -> None:
         if grid_pct <= 0:
             raise ValueError(f"grid_pct must be > 0, got {grid_pct}")
@@ -84,6 +92,27 @@ class OrderManager:
         # For grid methods that need the pct fallback (fixed_pct uses grid_pct)
         if "pct" not in self.grid_params:
             self.grid_params["pct"] = grid_pct
+        # Optional per-layer zones (Stage 2 combos). Default None = single-zone legacy behaviour.
+        self.zones = zones
+        if self.zones is not None:
+            # Sort by layer_start for fast lookup; validator guarantees non-overlap & contiguity
+            self.zones = sorted(self.zones, key=lambda z: z.layer_start)
+
+    def _active_zone(self, next_layer_index: int):
+        """Return the zone that owns this layer (1-indexed).
+
+        next_layer_index is the index of the NEXT layer to be filled (1-indexed).
+        Falls back to the last zone if next_layer_index exceeds all zone bounds
+        (shouldn't happen when max_layers matches zones coverage, but defends
+        against off-by-one in callers).
+        Returns None only when self.zones is empty.
+        """
+        if not self.zones:
+            return None
+        for zone in self.zones:
+            if zone.layer_start <= next_layer_index <= zone.layer_start + zone.layer_count - 1:
+                return zone
+        return self.zones[-1]
 
     def _check_confirmations(
         self,
@@ -183,6 +212,20 @@ class OrderManager:
         # For pluggable grid methods, compute the trigger price via dca_calc.
         from dca_calc.grid_spacing import GridContext, compute_next_layer_price
 
+        # Zone-aware dispatch: pick (grid_method, grid_params) from the zone that owns
+        # the next layer index. next_layer_index is 1-indexed (1 = first DCA fill).
+        next_layer_index = position_layers + 1
+        zone = self._active_zone(next_layer_index) if self.zones else None
+        if zone is not None:
+            active_grid_method = zone.grid_method.value
+            active_grid_params = dict(zone.grid_params)
+            # Fallback: ensure pct is set for fixed_pct-style methods
+            if "pct" not in active_grid_params:
+                active_grid_params["pct"] = self.grid_pct
+        else:
+            active_grid_method = self.grid_method
+            active_grid_params = self.grid_params
+
         ctx = GridContext(
             current_price=current_price,
             avg_entry=average_entry,
@@ -198,8 +241,8 @@ class OrderManager:
             reference_high=average_entry,
         )
         next_layer_target = compute_next_layer_price(
-            grid_method=self.grid_method,
-            grid_params=self.grid_params,
+            grid_method=active_grid_method,
+            grid_params=active_grid_params,
             ctx=ctx,
         )
         if next_layer_target is None:

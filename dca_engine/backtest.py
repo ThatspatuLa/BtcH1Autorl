@@ -79,10 +79,12 @@ def backtest_candidate(
     cooldown_candles: int = 0,
     grid_method: str = "fixed_pct",
     grid_params: dict[str, float] | None = None,
+    zones: list | None = None,
 ) -> BacktestResult:
     """Run one candidate backtest through the OHLCV dataframe.
 
     Stage 3 placeholder: simple grid_pct + fixed TP. Stage 8 wires confirmations.
+    Stage 2 combos: pass `zones` to enable per-layer method switching.
     """
     order_manager = OrderManager(
         grid_pct=grid_pct,
@@ -94,6 +96,7 @@ def backtest_candidate(
         cooldown_candles=cooldown_candles,
         grid_method=grid_method,
         grid_params=grid_params,
+        zones=zones,
     )
 
     # Pre-compute indicators if confirmations are active
